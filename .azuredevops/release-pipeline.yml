@@ -1,0 +1,9 @@
+# DEPRECATED: Release Pipeline No Longer Used
+#
+# With the new branching strategy, all deployments are handled in build-pipeline.yml:
+#   - develop branch: Promotes to Registry after training
+#   - release/* branch: Deploys from Registry to Test
+#   - main branch: Deploys from Registry to Production
+#
+# This file is kept for reference only.
+# See: build-pipeline.yml for current deployment logic

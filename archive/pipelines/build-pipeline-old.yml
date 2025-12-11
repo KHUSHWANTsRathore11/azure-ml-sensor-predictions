@@ -1,0 +1,609 @@
+# Component-Based Build Pipeline - Train Once, Deploy Everywhere
+# Branch Strategy:
+#   develop    → Train in Dev workspace + Promote to Registry
+#   release/*  → Deploy from Registry to Test endpoints (no training)
+#   main       → Deploy from Registry to Prod endpoints (no training)
+
+trigger:
+  branches:
+    include:
+      - develop
+      - release/*
+      - main
+  paths:
+    include:
+      - config/circuits.yaml
+      - config/environment.yaml
+      - components/**
+      - src/packages/**
+
+pr:
+  branches:
+    include:
+      - develop
+      - release/*
+      - main
+  paths:
+    include:
+      - config/circuits.yaml
+      - config/environment.yaml
+      - components/**
+      - src/packages/**
+
+variables:
+  - name: pythonVersion
+    value: '3.9'
+  
+  # Branch-to-environment mapping
+  - name: targetEnvironment
+    ${{ if eq(variables['Build.SourceBranch'], 'refs/heads/develop') }}:
+      value: 'dev'
+    ${{ elseif startsWith(variables['Build.SourceBranch'], 'refs/heads/release/') }}:
+      value: 'test'
+    ${{ elseif eq(variables['Build.SourceBranch'], 'refs/heads/main') }}:
+      value: 'prod'
+    ${{ else }}:
+      value: 'dev'
+  
+  # Load environment-specific variable groups (these contain all Azure/config settings)
+  # Variable groups are managed in Azure DevOps Library and contain:
+  # - Azure credentials (azureServiceConnection, subscriptionId)
+  # - Workspace settings (workspaceName, resourceGroup, location)
+  # - Compute settings (trainingCluster, trainingVmSize, etc.)
+  # - Training hyperparameters (lstmUnits, epochs, learningRate, etc.)
+  # - Validation thresholds (minAccuracy, maxMae, minR2Score, etc.)
+  # - Deployment settings (autoDeploy, approvalRequired)
+  # - Monitoring settings (logLevel, alertsEnabled)
+  - ${{ if eq(variables['Build.SourceBranch'], 'refs/heads/develop') }}:
+    - group: mlops-dev-variables
+    - group: mlops-registry-variables
+  - ${{ if startsWith(variables['Build.SourceBranch'], 'refs/heads/release/') }}:
+    - group: mlops-test-variables
+    - group: mlops-registry-variables
+  - ${{ if eq(variables['Build.SourceBranch'], 'refs/heads/main') }}:
+    - group: mlops-prod-variables
+    - group: mlops-registry-variables
+
+stages:
+  # ============================================
+  # BRANCH-SPECIFIC STAGES
+  # ============================================
+  
+  # DEVELOP BRANCH: Train in Dev + Promote to Registry
+  ${{ if eq(variables['Build.SourceBranch'], 'refs/heads/develop') }}:
+  # ============================================
+  # Stage 1: Register Environment, Components & MLTable Assets
+  # ============================================
+  - stage: RegisterInfrastructure
+    displayName: 'Register Environment, Components & Data Assets'
+    jobs:
+      - job: RegisterAll
+        displayName: 'Register environment, components, and MLTable per circuit'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+            fetchDepth: 0
+          
+          - task: UsePythonVersion@0
+            displayName: 'Use Python $(pythonVersion)'
+            inputs:
+              versionSpec: '$(pythonVersion)'
+          
+          - script: |
+              pip install pyyaml
+            displayName: 'Install Python dependencies'
+          
+          # Display loaded configuration
+          - script: |
+              echo "🔧 Environment Configuration"
+              echo "=============================="
+              echo "Environment: $(targetEnvironment)"
+              echo "Workspace: $(workspaceName)"
+              echo "Resource Group: $(resourceGroup)"
+              echo "Training Cluster: $(trainingCluster)"
+              echo "Training VM Size: $(trainingVmSize)"
+              echo "LSTM Units: $(lstmUnits)"
+              echo "Epochs: $(epochs)"
+              echo "Min Accuracy: $(minAccuracy)"
+              echo "Auto Deploy: $(autoDeploy)"
+              echo ""
+            displayName: 'Display Environment Configuration'
+          
+          # Generate individual circuit config files
+          - script: |
+              echo "📝 Generating individual circuit config files..."
+              python3 scripts/generate_circuit_configs.py
+            displayName: 'Generate Circuit Config Files'
+          
+          # Step 1: Register Custom Environment (Dockerfile-based)
+          - task: AzureCLI@2
+            displayName: 'Register Custom Environment with Dockerfile'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "🐳 Registering Dockerfile-based environment..."
+                
+                # Register environment (Azure ML will build Docker image from Dockerfile)
+                az ml environment create \
+                  --file config/environment.yaml \
+                  --workspace-name $(workspaceName) \
+                  --resource-group $(resourceGroup)
+                
+                # Get registered version
+                ENV_VERSION=$(az ml environment show \
+                  --name sensor-forecasting-env \
+                  --workspace-name $(workspaceName) \
+                  --resource-group $(resourceGroup) \
+                  --query version -o tsv | sort -V | tail -1)
+                
+                # Get package version from version.py
+                PACKAGE_VERSION=$(python3 -c "import sys; sys.path.insert(0, 'src/packages/sensor-forecasting'); from version import __version__; print(__version__)")
+                
+                echo "✅ Environment: sensor-forecasting-env:$ENV_VERSION"
+                echo "   Build Context: src/packages/sensor-forecasting/"
+                echo "   Dockerfile: src/packages/sensor-forecasting/Dockerfile"
+                echo "   Package Version: $PACKAGE_VERSION"
+                echo ""
+                echo "Note: Docker image will be built by Azure ML on first job execution"
+                
+                echo "##vso[task.setvariable variable=envVersion;isOutput=true]$ENV_VERSION"
+                echo "##vso[task.setvariable variable=packageVersion;isOutput=true]$PACKAGE_VERSION"
+            name: registerEnv
+          
+          # Step 2: Detect Changed Circuits
+          - script: |
+              echo "🔍 Detecting changed circuits..."
+              python scripts/detect_config_changes.py \
+                --target-branch origin/main \
+                --output changed_circuits.json
+              
+              # Display results
+              cat changed_circuits.json
+              
+              # Count changed circuits
+              CIRCUIT_COUNT=$(python -c "import json; print(len(json.load(open('changed_circuits.json'))))")
+              echo "##vso[task.setvariable variable=circuitCount;isOutput=true]$CIRCUIT_COUNT"
+              
+              if [ "$CIRCUIT_COUNT" -eq 0 ]; then
+                echo "⚠️  No circuits changed, will skip training"
+              else
+                echo "✅ $CIRCUIT_COUNT circuit(s) need training"
+              fi
+            name: detectChanges
+            displayName: 'Detect Changed Circuits'
+          
+          # Step 3: Register Components
+          - task: AzureCLI@2
+            displayName: 'Register Training Component'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "📦 Registering training component..."
+                
+                az ml component create \
+                  --file components/training/train-lstm-model/component.yaml \
+                  --workspace-name $(workspaceName) \
+                  --resource-group $(resourceGroup)
+                
+                # Get registered version
+                TRAIN_VERSION=$(az ml component show \
+                  --name train_lstm_model \
+                  --workspace-name $(workspaceName) \
+                  --resource-group $(resourceGroup) \
+                  --query version -o tsv | sort -V | tail -1)
+                
+                echo "✅ Component: train_lstm_model:$TRAIN_VERSION"
+                echo "##vso[task.setvariable variable=trainComponentVersion;isOutput=true]$TRAIN_VERSION"
+            name: registerComponents
+          
+          - task: AzureCLI@2
+            displayName: 'Register Scoring Component'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "📦 Registering scoring component..."
+                
+                az ml component create \
+                  --file components/scoring/batch-score/component.yaml \
+                  --workspace-name $(workspaceName) \
+                  --resource-group $(resourceGroup)
+                
+                SCORE_VERSION=$(az ml component show \
+                  --name batch_score \
+                  --workspace-name $(workspaceName) \
+                  --resource-group $(resourceGroup) \
+                  --query version -o tsv | sort -V | tail -1)
+                
+                echo "✅ Component: batch_score:$SCORE_VERSION"
+          
+          # Step 4: Register MLTable Data Assets (per circuit)
+          - task: AzureCLI@2
+            displayName: 'Register MLTable Data Assets'
+            condition: gt(variables['detectChanges.circuitCount'], 0)
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "📊 Registering MLTable data assets..."
+                
+                # Read changed circuits
+                CIRCUITS=$(cat changed_circuits.json)
+                
+                # Parse and register each circuit's data
+                echo "$CIRCUITS" | python -c "
+                import sys
+                import json
+                import subprocess
+                
+                circuits = json.load(sys.stdin)
+                
+                for circuit in circuits:
+                    plant_id = circuit['plant_id']
+                    circuit_id = circuit['circuit_id']
+                    cutoff_date = circuit['cutoff_date']
+                    
+                    # MLTable asset name: PLANT_CIRCUIT
+                    data_name = f'{plant_id}_{circuit_id}'
+                    # MLTable version: cutoff_date
+                    data_version = cutoff_date
+                    
+                    print(f'\\n📦 Registering: {data_name}:{data_version}')
+                    
+                    # Check if version exists
+                    check_cmd = [
+                        'az', 'ml', 'data', 'show',
+                        '--name', data_name,
+                        '--version', data_version,
+                        '--workspace-name', '$(workspaceName)',
+                        '--resource-group', '$(resourceGroup)'
+                    ]
+                    
+                    result = subprocess.run(check_cmd, capture_output=True, text=True)
+                    
+                    if result.returncode == 0:
+                        print(f'   ✅ Already exists: {data_name}:{data_version}')
+                    else:
+                        print(f'   📝 Creating new MLTable asset...')
+                        
+                        # Register new MLTable
+                        create_cmd = [
+                            'az', 'ml', 'data', 'create',
+                            '--name', data_name,
+                            '--version', data_version,
+                            '--type', 'mltable',
+                            '--path', f'azureml://datastores/workspaceblobstore/paths/mltable/{plant_id}_{circuit_id}/',
+                            '--workspace-name', '$(workspaceName)',
+                            '--resource-group', '$(resourceGroup)'
+                        ]
+                        
+                        result = subprocess.run(create_cmd, capture_output=True, text=True)
+                        
+                        if result.returncode == 0:
+                            print(f'   ✅ Registered: {data_name}:{data_version}')
+                        else:
+                            print(f'   ❌ Failed: {result.stderr}')
+                            sys.exit(1)
+                "
+                
+                echo ""
+                echo "✅ MLTable registration complete"
+          
+          # Publish changed_circuits.json as artifact
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Changed Circuits Artifact'
+            condition: gt(variables['detectChanges.circuitCount'], 0)
+            inputs:
+              targetPath: 'changed_circuits.json'
+              artifactName: 'changed-circuits'
+
+  # ============================================
+  # Stage 2: Parallel Training (Dynamic Loop)
+  # ============================================
+  - stage: ParallelTraining
+    displayName: 'Train Changed Circuits (Parallel)'
+    dependsOn: RegisterInfrastructure
+    condition: gt(dependencies.RegisterInfrastructure.outputs['RegisterAll.detectChanges.circuitCount'], 0)
+    variables:
+      trainComponentVersion: $[ stageDependencies.RegisterInfrastructure.RegisterAll.outputs['registerComponents.trainComponentVersion'] ]
+    jobs:
+      - job: TrainAllCircuits
+        displayName: 'Train Changed Circuits (Max 5 Parallel)'
+        pool:
+          vmImage: 'ubuntu-latest'
+        timeoutInMinutes: 360  # 6 hours max for all training
+        
+        steps:
+          - checkout: self
+          
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download Changed Circuits'
+            inputs:
+              artifactName: 'changed-circuits'
+              targetPath: '$(Pipeline.Workspace)'
+          
+          - task: AzureCLI@2
+            displayName: 'Submit Training Pipelines (Parallel)'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "🚀 Starting parallel training for changed circuits..."
+                echo "Component Version: $(trainComponentVersion)"
+                echo "Max Parallel Jobs: 5"
+                echo ""
+                
+                # Read changed circuits
+                CIRCUITS=$(cat $(Pipeline.Workspace)/changed_circuits.json)
+                CIRCUIT_COUNT=$(echo "$CIRCUITS" | jq 'length')
+                
+                echo "Total circuits to train: $CIRCUIT_COUNT"
+                echo ""
+                
+                # Array to track job names and status
+                declare -A JOB_STATUS
+                declare -a JOB_NAMES
+                
+                # Submit all training jobs (Azure ML will handle queueing)
+                echo "$CIRCUITS" | jq -c '.[]' | while read circuit; do
+                  PLANT_ID=$(echo $circuit | jq -r '.plant_id')
+                  CIRCUIT_ID=$(echo $circuit | jq -r '.circuit_id')
+                  CUTOFF_DATE=$(echo $circuit | jq -r '.cutoff_date')
+                  DATA_NAME="${PLANT_ID}_${CIRCUIT_ID}"
+                  
+                  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                  echo "📋 Submitting: $PLANT_ID / $CIRCUIT_ID"
+                  echo "   Data: azureml:$DATA_NAME:$CUTOFF_DATE"
+                  echo "   Component: train_lstm_model:$(trainComponentVersion)"
+                  
+                  # Submit training pipeline (non-blocking)
+                  JOB_NAME=$(az ml job create \
+                    --file pipelines/single-circuit-training.yaml \
+                    --workspace-name $(workspaceName) \
+                    --resource-group $(resourceGroup) \
+                    --set display_name="Train-${PLANT_ID}-${CIRCUIT_ID}-$(Build.BuildNumber)" \
+                    --set jobs.train.component="azureml:train_lstm_model:$(trainComponentVersion)" \
+                    --set inputs.circuit_config.path="config/circuits/${DATA_NAME}.yaml" \
+                    --set inputs.training_data.path="azureml:${DATA_NAME}:${CUTOFF_DATE}" \
+                    --set tags.plant_id="$PLANT_ID" \
+                    --set tags.circuit_id="$CIRCUIT_ID" \
+                    --set tags.cutoff_date="$CUTOFF_DATE" \
+                    --set tags.build_id="$(Build.BuildId)" \
+                    --set tags.component_version="$(trainComponentVersion)" \
+                    --query name -o tsv)
+                  
+                  if [ -n "$JOB_NAME" ]; then
+                    echo "   ✅ Submitted: $JOB_NAME"
+                    echo "$JOB_NAME|$PLANT_ID|$CIRCUIT_ID" >> /tmp/submitted_jobs.txt
+                  else
+                    echo "   ❌ Failed to submit job for $PLANT_ID/$CIRCUIT_ID"
+                    exit 1
+                  fi
+                done
+                
+                echo ""
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "✅ All training jobs submitted"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo ""
+                
+                # Save submitted jobs for monitoring
+                cp /tmp/submitted_jobs.txt $(Pipeline.Workspace)/submitted_jobs.txt
+          
+          - task: AzureCLI@2
+            displayName: 'Monitor Training Jobs'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "📊 Monitoring training jobs..."
+                echo ""
+                
+                # Read submitted jobs
+                if [ ! -f "$(Pipeline.Workspace)/submitted_jobs.txt" ]; then
+                  echo "❌ No jobs found to monitor"
+                  exit 1
+                fi
+                
+                # Monitor all jobs until completion
+                declare -A JOB_STATUS
+                TOTAL_JOBS=$(wc -l < $(Pipeline.Workspace)/submitted_jobs.txt)
+                COMPLETED_JOBS=0
+                FAILED_JOBS=0
+                
+                echo "Total jobs to monitor: $TOTAL_JOBS"
+                echo ""
+                
+                # Poll every 60 seconds
+                while [ $COMPLETED_JOBS -lt $TOTAL_JOBS ]; do
+                  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                  echo "⏱️  $(date '+%Y-%m-%d %H:%M:%S') - Status Check"
+                  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                  
+                  COMPLETED_JOBS=0
+                  FAILED_JOBS=0
+                  RUNNING_JOBS=0
+                  
+                  while IFS='|' read -r JOB_NAME PLANT_ID CIRCUIT_ID; do
+                    # Skip if already marked as done
+                    if [ -n "${JOB_STATUS[$JOB_NAME]}" ]; then
+                      if [ "${JOB_STATUS[$JOB_NAME]}" = "Completed" ]; then
+                        COMPLETED_JOBS=$((COMPLETED_JOBS + 1))
+                      elif [ "${JOB_STATUS[$JOB_NAME]}" = "Failed" ]; then
+                        FAILED_JOBS=$((FAILED_JOBS + 1))
+                        COMPLETED_JOBS=$((COMPLETED_JOBS + 1))
+                      fi
+                      continue
+                    fi
+                    
+                    # Check job status
+                    STATUS=$(az ml job show \
+                      --name $JOB_NAME \
+                      --workspace-name $(workspaceName) \
+                      --resource-group $(resourceGroup) \
+                      --query status -o tsv 2>/dev/null || echo "Unknown")
+                    
+                    if [ "$STATUS" = "Completed" ]; then
+                      echo "   ✅ $PLANT_ID/$CIRCUIT_ID - Completed"
+                      JOB_STATUS[$JOB_NAME]="Completed"
+                      COMPLETED_JOBS=$((COMPLETED_JOBS + 1))
+                    elif [ "$STATUS" = "Failed" ]; then
+                      echo "   ❌ $PLANT_ID/$CIRCUIT_ID - Failed"
+                      JOB_STATUS[$JOB_NAME]="Failed"
+                      FAILED_JOBS=$((FAILED_JOBS + 1))
+                      COMPLETED_JOBS=$((COMPLETED_JOBS + 1))
+                    elif [ "$STATUS" = "Running" ] || [ "$STATUS" = "Preparing" ]; then
+                      echo "   🔄 $PLANT_ID/$CIRCUIT_ID - $STATUS"
+                      RUNNING_JOBS=$((RUNNING_JOBS + 1))
+                    else
+                      echo "   ⏳ $PLANT_ID/$CIRCUIT_ID - $STATUS"
+                    fi
+                  done < $(Pipeline.Workspace)/submitted_jobs.txt
+                  
+                  echo ""
+                  echo "📊 Summary: $COMPLETED_JOBS/$TOTAL_JOBS completed ($FAILED_JOBS failed, $RUNNING_JOBS running)"
+                  echo ""
+                  
+                  # Break if all done
+                  if [ $COMPLETED_JOBS -ge $TOTAL_JOBS ]; then
+                    break
+                  fi
+                  
+                  # Wait before next poll
+                  sleep 60
+                done
+                
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "📋 Final Results"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "Total Jobs: $TOTAL_JOBS"
+                echo "Completed: $((COMPLETED_JOBS - FAILED_JOBS))"
+                echo "Failed: $FAILED_JOBS"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                
+                # Fail pipeline if any jobs failed
+                if [ $FAILED_JOBS -gt 0 ]; then
+                  echo ""
+                  echo "❌ $FAILED_JOBS training job(s) failed"
+                  exit 1
+                fi
+                
+                echo ""
+                echo "✅ All training jobs completed successfully!"
+
+  # ============================================
+  # Stage 3: Validate & Tag Models
+  # ============================================
+  - stage: ValidateModels
+    displayName: 'Validate & Tag Trained Models'
+    dependsOn: ParallelTraining
+    condition: succeeded()
+    variables:
+      trainComponentVersion: $[ stageDependencies.RegisterInfrastructure.RegisterAll.outputs['registerComponents.trainComponentVersion'] ]
+    jobs:
+      - job: ValidateAndTag
+        displayName: 'Validate metrics and tag models'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download Changed Circuits'
+            inputs:
+              artifactName: 'changed-circuits'
+              targetPath: '$(Pipeline.Workspace)'
+          
+          - task: AzureCLI@2
+            displayName: 'Tag Trained Models'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "🏷️  Tagging trained models..."
+                
+                # Read changed circuits
+                CIRCUITS=$(cat $(Pipeline.Workspace)/changed_circuits.json)
+                
+                echo "$CIRCUITS" | python -c "
+                import sys
+                import json
+                import subprocess
+                
+                circuits = json.load(sys.stdin)
+                
+                for circuit in circuits:
+                    plant_id = circuit['plant_id']
+                    circuit_id = circuit['circuit_id']
+                    cutoff_date = circuit['cutoff_date']
+                    model_name = circuit.get('model_name', f'{plant_id.lower()}-{circuit_id.lower()}')
+                    
+                    print(f'\\n🏷️  Tagging model: {model_name}')
+                    
+                    # Get latest model version
+                    get_version_cmd = [
+                        'az', 'ml', 'model', 'list',
+                        '--name', model_name,
+                        '--workspace-name', '$(workspaceName)',
+                        '--resource-group', '$(resourceGroup)',
+                        '--query', '[0].version',
+                        '-o', 'tsv'
+                    ]
+                    
+                    result = subprocess.run(get_version_cmd, capture_output=True, text=True)
+                    
+                    if result.returncode == 0 and result.stdout.strip():
+                        model_version = result.stdout.strip()
+                        print(f'   Found version: {model_version}')
+                        
+                        # Tag the model
+                        tag_cmd = [
+                            'az', 'ml', 'model', 'update',
+                            '--name', model_name,
+                            '--version', model_version,
+                            '--workspace-name', '$(workspaceName)',
+                            '--resource-group', '$(resourceGroup)',
+                            '--add-tag', f'cutoff_date={cutoff_date}',
+                            '--add-tag', f'data_asset_name={plant_id}_{circuit_id}',
+                            '--add-tag', f'data_asset_version={cutoff_date}',
+                            '--add-tag', f'build_id=$(Build.BuildId)',
+                            '--add-tag', f'component_version=$(trainComponentVersion)',
+                            '--add-tag', 'validated=true',
+                            '--add-tag', f'plant_id={plant_id}',
+                            '--add-tag', f'circuit_id={circuit_id}'
+                        ]
+                        
+                        result = subprocess.run(tag_cmd, capture_output=True, text=True)
+                        
+                        if result.returncode == 0:
+                            print(f'   ✅ Tagged: {model_name}:{model_version}')
+                        else:
+                            print(f'   ⚠️  Failed to tag: {result.stderr}')
+                    else:
+                        print(f'   ⚠️  Model not found: {model_name}')
+                "
+                
+                echo ""
+                echo "✅ Model tagging complete"
+          
+          - task: AzureCLI@2
+            displayName: 'List Registered Models'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "📋 Recently registered models:"
+                az ml model list \
+                  --workspace-name $(workspaceName) \
+                  --resource-group $(resourceGroup) \
+                  --max-results 20 \
+                  --output table

@@ -1,0 +1,42 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandComponent.schema.json
+type: command
+
+name: batch_score
+display_name: Batch Score with LSTM Model
+version: 1.0.0
+description: Score batch data using trained LSTM model
+
+tags:
+  component_type: scoring
+  deployment_type: batch
+
+inputs:
+  model:
+    type: mlflow_model
+    description: Trained MLflow model
+  input_data:
+    type: uri_folder
+    description: Folder containing input files for scoring
+  circuit_config:
+    type: uri_file
+    description: Circuit configuration
+    optional: true
+
+outputs:
+  predictions:
+    type: uri_folder
+    description: Folder with prediction results
+  scoring_logs:
+    type: uri_file
+    description: Scoring execution logs
+
+code: ./src
+environment: azureml:sensor-forecasting-env:1.0.0
+
+command: >-
+  python score.py
+  --model ${{inputs.model}}
+  --input-data ${{inputs.input_data}}
+  $[[--circuit-config ${{inputs.circuit_config}}]]
+  --predictions-output ${{outputs.predictions}}
+  --logs-output ${{outputs.scoring_logs}}

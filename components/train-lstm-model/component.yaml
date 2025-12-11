@@ -1,0 +1,63 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandComponent.schema.json
+type: command
+
+name: train_lstm_model
+display_name: Train LSTM Model
+version: 1.0.0
+description: |
+  Train LSTM model for time series forecasting on sensor data.
+  
+  IMPORTANT: The training script MUST log all configuration parameters from circuit_config
+  to MLflow for run comparison and tracking. This includes:
+  - plant_id, circuit_id, cutoff_date
+  - All hyperparameters (lstm_units, learning_rate, epochs, batch_size, etc.)
+  - Feature list and preprocessing settings
+  - Training/validation split details
+
+tags:
+  model_type: lstm
+  framework: tensorflow
+  use_case: time_series_forecasting
+
+inputs:
+  circuit_config:
+    type: uri_file
+    description: |
+      Circuit configuration YAML containing all training parameters.
+      Config is passed as file for simplicity - all params logged to MLflow for tracking.
+  training_data:
+    type: mltable
+    description: Training data from registered MLTable
+  hyperparameters:
+    type: uri_file
+    description: Hyperparameter configuration (optional)
+    optional: true
+
+outputs:
+  trained_model:
+    type: mlflow_model
+    description: Trained MLflow model
+  metrics:
+    type: uri_file
+    description: Training metrics JSON
+  training_artifacts:
+    type: uri_folder
+    description: Training artifacts (plots, logs, checkpoints)
+
+code: ./src
+environment: azureml:sensor-forecasting-env:1.0.0
+
+command: >-
+  python train.py
+  --circuit-config ${{inputs.circuit_config}}
+  --training-data ${{inputs.training_data}}
+  $[[--hyperparameters ${{inputs.hyperparameters}}]]
+  --model-output ${{outputs.trained_model}}
+  --metrics-output ${{outputs.metrics}}
+  --artifacts-output ${{outputs.training_artifacts}}
+
+resources:
+  instance_count: 1
+
+distribution:
+  type: pytorch

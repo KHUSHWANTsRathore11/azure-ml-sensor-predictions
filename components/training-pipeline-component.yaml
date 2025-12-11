@@ -1,0 +1,49 @@
+$schema: https://azuremlschemas.azureedge.net/latest/pipelineComponent.schema.json
+type: pipeline
+
+name: sensor_training_pipeline
+display_name: Sensor Circuit Training Pipeline
+version: 1.0.0
+description: Complete training pipeline for sensor circuit LSTM forecasting
+
+tags:
+  pipeline_type: training
+  model_type: lstm
+  use_case: sensor_forecasting
+
+inputs:
+  circuit_config:
+    type: uri_file
+    description: Circuit-specific configuration YAML
+  training_data:
+    type: mltable
+    description: Pre-registered MLTable data asset (circuit-specific version)
+
+outputs:
+  trained_model:
+    type: custom_model
+  training_metrics:
+    type: uri_file
+  training_artifacts:
+    type: uri_folder
+
+jobs:
+  # Single job: Train LSTM model for one circuit
+  train:
+    type: command
+    component: file:./train-lstm-model/component.yaml  # Local component file
+    inputs:
+      circuit_config: ${{parent.inputs.circuit_config}}
+      training_data: ${{parent.inputs.training_data}}
+    outputs:
+      trained_model: ${{parent.outputs.trained_model}}
+      metrics: ${{parent.outputs.training_metrics}}
+      training_artifacts: ${{parent.outputs.training_artifacts}}
+    
+    resources:
+      instance_count: 1
+      instance_type: Standard_DS3_v2
+    
+    environment_variables:
+      MLFLOW_EXPERIMENT_NAME: circuit-training
+      MLFLOW_TRACKING_URI: azureml://tracking

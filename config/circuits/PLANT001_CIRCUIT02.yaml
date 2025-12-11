@@ -1,0 +1,20 @@
+plant_id: PLANT001
+circuit_id: CIRCUIT02
+model_name: plant001-circuit02
+description: Hydraulic press system
+features:
+- temperature
+- pressure
+- vibration
+- current
+- voltage
+- flow_rate
+cutoff_date: '2025-11-01'
+training_days: 365
+forecast_horizon: 7
+hyperparameters:
+  lstm_units: 64
+  learning_rate: 0.001
+  epochs: 50
+  batch_size: 32
+environment_version: 1.0.0

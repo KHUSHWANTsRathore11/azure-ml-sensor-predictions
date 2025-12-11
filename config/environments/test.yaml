@@ -1,0 +1,103 @@
+# Test Environment Configuration
+# Branch: release/*
+# Workspace: mlops-test-workspace
+
+environment:
+  name: test
+  branch: release/*
+  
+azure:
+  subscription_id: "00000000-0000-0000-0000-000000000000"  # Replace with actual subscription
+  resource_group: "mlops-test-rg"
+  workspace_name: "mlops-test-workspace"
+  location: "eastus"
+  
+  # Azure ML compute
+  compute:
+    training_cluster: "test-training-cluster"
+    training_vm_size: "Standard_DS4_v2"
+    training_min_nodes: 0
+    training_max_nodes: 6
+    
+    scoring_cluster: "test-scoring-cluster"
+    scoring_vm_size: "Standard_DS3_v2"
+    scoring_min_nodes: 0
+    scoring_max_nodes: 4
+
+  # Batch endpoints
+  batch_endpoints:
+    instance_count: 2
+    max_concurrency_per_instance: 4
+    mini_batch_size: 20
+    timeout_seconds: 600
+
+# Model training settings
+training:
+  # Retrain frequency (test mimics production)
+  schedule: "0 1 * * 0"  # Weekly on Sunday at 1 AM
+  
+  # Data settings
+  lookback_days: 180
+  forecast_horizon: 7
+  
+  # Model hyperparameters (production-like)
+  hyperparameters:
+    lstm_units: 128
+    dropout_rate: 0.3
+    learning_rate: 0.0005
+    epochs: 100
+    batch_size: 64
+    early_stopping_patience: 10
+
+  # Validation settings
+  validation_split: 0.2
+  test_split: 0.1
+
+# Model validation thresholds (stricter for test)
+validation:
+  min_accuracy: 0.80
+  max_mae: 7.0
+  max_rmse: 10.0
+  min_r2_score: 0.75
+
+# Deployment settings
+deployment:
+  auto_deploy: false  # Manual approval for test
+  approval_required: true
+  canary_deployment: true
+  traffic_percentage: 50  # Canary with 50% traffic
+
+# Monitoring and alerts
+monitoring:
+  enabled: true
+  log_level: "INFO"
+  
+  alerts:
+    enabled: true
+    channels:
+      - email
+      - slack
+    email_recipients:
+      - "qa-team@company.com"
+      - "ml-team@company.com"
+    slack_webhook: "https://hooks.slack.com/services/YOUR/TEST/WEBHOOK"
+  
+  # Alert thresholds
+  alert_thresholds:
+    model_drift: 0.15
+    data_drift: 0.20
+    prediction_latency_ms: 1000
+    error_rate_percent: 5
+
+# Data retention
+retention:
+  models: 90  # Keep models for 90 days
+  logs: 30  # Keep logs for 30 days
+  datasets: 180  # Keep datasets for 180 days
+
+# Tags
+tags:
+  environment: "test"
+  cost_center: "ml-test"
+  owner: "qa-team"
+  auto_shutdown: "enabled"

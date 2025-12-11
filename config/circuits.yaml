@@ -1,0 +1,127 @@
+# Circuit Configuration for Multi-Model Training
+# This file defines all sensor circuits across plants
+
+circuits:
+  # Plant 1 - Manufacturing Facility East
+  - plant_id: "PLANT001"
+    circuit_id: "CIRCUIT01"
+    model_name: "plant001-circuit01"
+    description: "Primary cooling system"
+    features:
+      - temperature
+      - pressure
+      - vibration
+      - current
+      - voltage
+      - flow_rate
+    cutoff_date: "2025-11-01"
+    training_days: 365
+    forecast_horizon: 7
+    hyperparameters:
+      lstm_units: 64
+      learning_rate: 0.001
+      epochs: 50
+      batch_size: 32
+    environment_version: "1.0.0"
+    
+  - plant_id: "PLANT001"
+    circuit_id: "CIRCUIT02"
+    model_name: "plant001-circuit02"
+    description: "Hydraulic press system"
+    features:
+      - temperature
+      - pressure
+      - vibration
+      - current
+      - voltage
+      - flow_rate
+    cutoff_date: "2025-11-01"
+    training_days: 365
+    forecast_horizon: 7
+    hyperparameters:
+      lstm_units: 64
+      learning_rate: 0.001
+      epochs: 50
+      batch_size: 32
+    environment_version: "1.0.0"
+
+  - plant_id: "PLANT001"
+    circuit_id: "CIRCUIT03"
+    model_name: "plant001-circuit03"
+    description: "Conveyor belt motor"
+    features:
+      - temperature
+      - pressure
+      - vibration
+      - current
+      - voltage
+      - flow_rate
+    cutoff_date: "2025-11-01"
+    training_days: 365
+    forecast_horizon: 7
+    hyperparameters:
+      lstm_units: 64
+      learning_rate: 0.001
+      epochs: 50
+      batch_size: 32
+    environment_version: "1.0.0"
+
+  # Plant 2 - Manufacturing Facility West
+  - plant_id: "PLANT002"
+    circuit_id: "CIRCUIT01"
+    model_name: "plant002-circuit01"
+    description: "Main compressor unit"
+    features:
+      - temperature
+      - pressure
+      - vibration
+      - current
+      - voltage
+      - flow_rate
+    cutoff_date: "2025-11-01"
+    training_days: 365
+    forecast_horizon: 7
+    hyperparameters:
+      lstm_units: 64
+      learning_rate: 0.001
+      epochs: 50
+      batch_size: 32
+    environment_version: "1.0.0"
+
+  - plant_id: "PLANT002"
+    circuit_id: "CIRCUIT02"
+    model_name: "plant002-circuit02"
+    description: "Cooling tower system"
+    features:
+      - temperature
+      - pressure
+      - vibration
+      - current
+      - voltage
+      - flow_rate
+    cutoff_date: "2025-11-01"
+    training_days: 365
+    forecast_horizon: 7
+    hyperparameters:
+      lstm_units: 64
+      learning_rate: 0.001
+      epochs: 50
+      batch_size: 32
+    environment_version: "1.0.0"
+
+# Add more circuits as needed (up to 75-200 circuits)
+# Template for additional circuits:
+#  - plant_id: "PLANTXXX"
+#    circuit_id: "CIRCUITXX"
+#    model_name: "plantxxx-circuitxx"
+#    description: "Circuit description"
+#    features: [temperature, pressure, vibration, current, voltage, flow_rate]
+#    cutoff_date: "2025-11-01"
+#    training_days: 365
+#    forecast_horizon: 7
+#    hyperparameters:
+#      lstm_units: 64
+#      learning_rate: 0.001
+#      epochs: 50
+#      batch_size: 32
+#    environment_version: "1.0.0"

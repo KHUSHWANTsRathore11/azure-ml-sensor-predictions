@@ -1,0 +1,23 @@
+$schema: https://azuremlschemas.azureedge.net/latest/environment.schema.json
+name: sensor-forecasting-env
+version: "1.0.0"
+description: Custom Docker environment with embedded sensor-forecasting package
+
+# Build from Dockerfile (Azure ML builds and caches automatically)
+build:
+  path: ../src/packages/sensor-forecasting
+  dockerfile_path: Dockerfile
+
+tags:
+  framework: tensorflow
+  tensorflow_version: "2.13.0"
+  build_type: dockerfile
+  package_name: sensor-forecasting
+  package_version: "1.0.0"
+  purpose: time-series-forecasting
+  
+# Manual Version Update Process:
+# 1. Update version in src/packages/sensor-forecasting/version.py
+# 2. Update version and package_version tag in this file
+# 3. Commit both files together
+# 4. Push to trigger pipeline - all circuits will retrain

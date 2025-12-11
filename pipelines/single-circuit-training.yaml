@@ -1,0 +1,27 @@
+$schema: https://azuremlschemas.azureedge.net/latest/pipelineJob.schema.json
+type: pipeline
+component: azureml:sensor_training_pipeline:1.0.0
+
+display_name: Single Circuit Training Pipeline
+description: Train a single circuit's LSTM model using pre-registered MLTable data
+
+inputs:
+  circuit_config:
+    type: uri_file
+    description: Circuit-specific configuration YAML
+  training_data:
+    type: mltable
+    description: Pre-registered MLTable data asset (circuit-specific version)
+
+outputs:
+  trained_model:
+    type: custom_model
+  training_metrics:
+    type: uri_file
+  training_artifacts:
+    type: uri_folder
+
+settings:
+  default_compute: azureml:cpu-cluster
+  default_datastore: azureml:workspaceblobstore
+  continue_on_step_failure: false

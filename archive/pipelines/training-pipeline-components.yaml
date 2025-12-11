@@ -1,0 +1,69 @@
+$schema: https://azuremlschemas.azureedge.net/latest/pipelineJob.schema.json
+type: pipeline
+
+display_name: Component-Based Training Pipeline
+description: Multi-circuit training using reusable components with MLTable registration
+
+inputs:
+  data_source_path:
+    type: uri_folder
+    path: azureml://datastores/workspaceblobstore/paths/mltable/
+  changed_circuits:
+    type: uri_file
+    description: JSON file with changed circuit configurations
+  data_version:
+    type: string
+    description: MLTable version (YYYY-MM-DD format)
+
+outputs:
+  trained_models:
+    type: uri_folder
+  training_metrics:
+    type: uri_folder
+  registered_data_info:
+    type: uri_file
+
+settings:
+  default_compute: azureml:cpu-cluster
+  default_datastore: azureml:workspaceblobstore
+  continue_on_step_failure: false
+
+jobs:
+  # Step 1: Register MLTable Data Asset
+  register_mltable:
+    type: command
+    component: azureml://registries/shared-registry/components/register_mltable/versions/1.0.0
+    inputs:
+      data_path: ${{parent.inputs.data_source_path}}
+      data_asset_name: sensor-data
+      data_version: ${{parent.inputs.data_version}}
+    outputs:
+      registered_asset_info: ${{parent.outputs.registered_data_info}}
+  
+  # Step 2: Train Models (Parallel execution for multiple circuits)
+  train_models:
+    type: parallel
+    component: azureml://registries/shared-registry/components/train_lstm_model/versions/1.0.0
+    inputs:
+      circuit_config: ${{parent.inputs.changed_circuits}}
+      training_data:
+        type: mltable
+        path: azureml:sensor-data:${{parent.inputs.data_version}}
+    outputs:
+      trained_model: ${{parent.outputs.trained_models}}
+      metrics: ${{parent.outputs.training_metrics}}
+    
+    # Parallel settings
+    max_concurrency_per_instance: 5
+    mini_batch_size: 1
+    input_data: ${{inputs.circuit_config}}
+    
+    retry_settings:
+      max_retries: 3
+      timeout: 3600
+    
+    logging_level: INFO
+    
+    resources:
+      instance_count: 1
+      instance_type: Standard_DS3_v2

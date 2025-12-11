@@ -1,0 +1,24 @@
+# MLTable Definition
+# This file defines how to read data from Delta Lake
+
+type: mltable
+
+paths:
+  - pattern: abfss://bronze@datalake.dfs.core.windows.net/sensors/*.parquet
+
+transformations:
+  - read_parquet:
+      include_path_column: false
+  
+  - filter: "date >= '2025-01-01'"
+  
+  - keep_columns:
+      - plant_id
+      - circuit_id
+      - timestamp
+      - temperature
+      - pressure
+      - vibration
+      - current
+      - voltage
+      - flow_rate

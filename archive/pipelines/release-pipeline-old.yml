@@ -1,0 +1,485 @@
+# Release Pipeline - Component-Based Multi-Stage Deployment
+# Promotes validated models from Dev → Registry → Test → Production
+# Manual approvals required for Registry and Production stages
+
+# Triggers only when main branch build completes (production promotion)
+trigger: none
+
+resources:
+  pipelines:
+    - pipeline: buildPipeline
+      source: 'Build-Pipeline'
+      trigger:
+        branches:
+          include:
+            - main  # Only promote to registry and prod from main branch
+
+variables:
+  - group: mlops-prod-variables  # Source from prod workspace
+  - group: mlops-test-variables  # Deploy to test
+  - group: mlops-registry-variables  # Registry for shared models
+  - name: sourceEnvironment
+    value: 'prod'  # Models come from prod workspace (main branch)
+  - name: sourceBranch
+    value: '$(resources.pipeline.buildPipeline.sourceBranch)'
+
+stages:
+  # ============================================
+  # Stage 1: Promote Validated Models to Registry
+  # ============================================
+  - stage: PromoteToRegistry
+    displayName: 'Promote Validated Models to Registry'
+    jobs:
+      - deployment: PromoteModels
+        displayName: 'Copy models from Dev Workspace to Shared Registry'
+        environment: 'Registry-Approval'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                
+                - task: DownloadPipelineArtifact@2
+                  displayName: 'Download changed circuits from build'
+                  inputs:
+                    source: 'specific'
+                    project: '$(System.TeamProject)'
+                    pipeline: '$(resources.pipeline.buildPipeline.pipelineID)'
+                    runVersion: 'latest'
+                    artifact: 'changed-circuits'
+                    path: '$(Pipeline.Workspace)'
+                
+                - task: AzureCLI@2
+                  displayName: 'Promote validated models to Registry'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "📦 Promoting validated models to Azure ML Registry..."
+                      
+                      # Read changed circuits
+                      CIRCUITS=$(cat $(Pipeline.Workspace)/changed_circuits.json)
+                      echo "Circuits to promote: $CIRCUITS"
+                      
+                      # Promote each model
+                      echo "$CIRCUITS" | jq -c '.[]' | while read circuit; do
+                        MODEL_NAME=$(echo $circuit | jq -r '.model_name')
+                        CUTOFF_DATE=$(echo $circuit | jq -r '.cutoff_date')
+                        PLANT_ID=$(echo $circuit | jq -r '.plant_id')
+                        CIRCUIT_ID=$(echo $circuit | jq -r '.circuit_id')
+                        
+                        echo ""
+                        echo "🔄 Promoting model: $MODEL_NAME"
+                        
+                        # Get latest validated model version from Dev workspace
+                        MODEL_VERSION=$(az ml model list \
+                          --name $MODEL_NAME \
+                          --workspace-name $(devWorkspaceName) \
+                          --resource-group $(devResourceGroup) \
+                          --query "[?tags.validated=='true'] | [0].version" \
+                          -o tsv)
+                        
+                        if [ -z "$MODEL_VERSION" ]; then
+                          echo "⚠️  No validated version found for $MODEL_NAME, skipping"
+                          continue
+                        fi
+                        
+                        echo "   Version: $MODEL_VERSION"
+                        echo "   Cutoff Date: $CUTOFF_DATE"
+                        
+                        # Download model from Dev workspace
+                        MODEL_PATH="/tmp/$MODEL_NAME-$MODEL_VERSION"
+                        az ml model download \
+                          --name $MODEL_NAME \
+                          --version $MODEL_VERSION \
+                          --download-path $MODEL_PATH \
+                          --workspace-name $(devWorkspaceName) \
+                          --resource-group $(devResourceGroup)
+                        
+                        # Promote to Registry
+                        az ml model create \
+                          --registry-name $(registryName) \
+                          --name $MODEL_NAME \
+                          --version $MODEL_VERSION \
+                          --path $MODEL_PATH \
+                          --type mlflow_model \
+                          --set tags.cutoff_date=$CUTOFF_DATE \
+                          --set tags.plant_id=$PLANT_ID \
+                          --set tags.circuit_id=$CIRCUIT_ID \
+                          --set tags.promoted_from=dev \
+                          --set tags.promoted_at=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+                          --set tags.release_id=$(Build.BuildNumber) \
+                          --set tags.build_id=$(Build.BuildId) \
+                          || echo "⚠️  Failed to promote $MODEL_NAME"
+                        
+                        echo "✅ Promoted $MODEL_NAME:$MODEL_VERSION to registry"
+                      done
+                      
+                      echo ""
+                      echo "📋 Models in Registry:"
+                      az ml model list \
+                        --registry-name $(registryName) \
+                        --tag release_id=$(Build.BuildNumber) \
+                        --output table
+                
+                - task: PublishPipelineArtifact@1
+                  displayName: 'Publish promoted models info'
+                  inputs:
+                    targetPath: '$(Pipeline.Workspace)/changed_circuits.json'
+                    artifactName: 'promoted-models'
+
+  # ============================================
+  # Stage 2: Deploy to Test Environment
+  # ============================================
+  - stage: DeployToTest
+    displayName: 'Deploy to Test Environment'
+    dependsOn: PromoteToRegistry
+    condition: succeeded()
+    jobs:
+      - deployment: DeployTest
+        displayName: 'Deploy models to Test Workspace batch endpoints'
+        environment: 'Test-Environment'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                
+                - task: DownloadPipelineArtifact@2
+                  displayName: 'Download promoted models info'
+                  inputs:
+                    artifactName: 'promoted-models'
+                    targetPath: '$(Pipeline.Workspace)'
+                
+                - task: AzureCLI@2
+                  displayName: 'Deploy models to Test batch endpoints'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "🎯 Deploying models to Test environment..."
+                      
+                      # Read promoted models
+                      CIRCUITS=$(cat $(Pipeline.Workspace)/changed_circuits.json)
+                      
+                      # Deploy each model to batch endpoint
+                      echo "$CIRCUITS" | jq -c '.[]' | while read circuit; do
+                        MODEL_NAME=$(echo $circuit | jq -r '.model_name')
+                        PLANT_ID=$(echo $circuit | jq -r '.plant_id')
+                        CIRCUIT_ID=$(echo $circuit | jq -r '.circuit_id')
+                        
+                        # Endpoint name: be-{plant}-{circuit}
+                        ENDPOINT_NAME="be-${PLANT_ID,,}-${CIRCUIT_ID,,}"
+                        
+                        echo ""
+                        echo "🚀 Deploying $MODEL_NAME to endpoint: $ENDPOINT_NAME"
+                        
+                        # Get model version from registry
+                        MODEL_VERSION=$(az ml model list \
+                          --registry-name $(registryName) \
+                          --name $MODEL_NAME \
+                          --tag release_id=$(Build.BuildNumber) \
+                          --query "[0].version" \
+                          -o tsv)
+                        
+                        if [ -z "$MODEL_VERSION" ]; then
+                          echo "⚠️  Model not found in registry: $MODEL_NAME"
+                          continue
+                        fi
+                        
+                        # Check if endpoint exists
+                        ENDPOINT_EXISTS=$(az ml batch-endpoint show \
+                          --name $ENDPOINT_NAME \
+                          --workspace-name $(testWorkspaceName) \
+                          --resource-group $(testResourceGroup) \
+                          --query name -o tsv 2>/dev/null || echo "not_found")
+                        
+                        if [ "$ENDPOINT_EXISTS" = "not_found" ]; then
+                          echo "   Creating batch endpoint: $ENDPOINT_NAME"
+                          az ml batch-endpoint create \
+                            --name $ENDPOINT_NAME \
+                            --workspace-name $(testWorkspaceName) \
+                            --resource-group $(testResourceGroup) \
+                            --description "Batch endpoint for $PLANT_ID $CIRCUIT_ID"
+                        else
+                          echo "   Endpoint exists: $ENDPOINT_NAME"
+                        fi
+                        
+                        # Create deployment
+                        DEPLOYMENT_NAME="deployment-$(Build.BuildNumber)"
+                        echo "   Creating deployment: $DEPLOYMENT_NAME"
+                        
+                        az ml batch-deployment create \
+                          --name $DEPLOYMENT_NAME \
+                          --endpoint-name $ENDPOINT_NAME \
+                          --model azureml://registries/$(registryName)/models/$MODEL_NAME/versions/$MODEL_VERSION \
+                          --compute-target batch-cluster \
+                          --instance-count 1 \
+                          --max-concurrency-per-instance 2 \
+                          --mini-batch-size 10 \
+                          --output-action append_row \
+                          --set-default \
+                          --workspace-name $(testWorkspaceName) \
+                          --resource-group $(testResourceGroup) \
+                          || echo "⚠️  Deployment failed for $MODEL_NAME"
+                        
+                        echo "✅ Deployed $MODEL_NAME:$MODEL_VERSION to Test"
+                      done
+                      
+                      echo ""
+                      echo "📋 Test deployments:"
+                      az ml batch-endpoint list \
+                        --workspace-name $(testWorkspaceName) \
+                        --resource-group $(testResourceGroup) \
+                        --output table
+                
+                - task: AzureCLI@2
+                  displayName: 'Run smoke tests on Test endpoints'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "🧪 Running smoke tests..."
+                      
+                      CIRCUITS=$(cat $(Pipeline.Workspace)/changed_circuits.json)
+                      
+                      echo "$CIRCUITS" | jq -c '.[]' | while read circuit; do
+                        MODEL_NAME=$(echo $circuit | jq -r '.model_name')
+                        PLANT_ID=$(echo $circuit | jq -r '.plant_id')
+                        CIRCUIT_ID=$(echo $circuit | jq -r '.circuit_id')
+                        ENDPOINT_NAME="be-${PLANT_ID,,}-${CIRCUIT_ID,,}"
+                        
+                        echo ""
+                        echo "🔍 Testing endpoint: $ENDPOINT_NAME"
+                        
+                        # Invoke batch endpoint with test data
+                        JOB_NAME=$(az ml batch-endpoint invoke \
+                          --name $ENDPOINT_NAME \
+                          --input azureml://datastores/workspaceblobstore/paths/test-data/$PLANT_ID/$CIRCUIT_ID/ \
+                          --workspace-name $(testWorkspaceName) \
+                          --resource-group $(testResourceGroup) \
+                          --query name -o tsv)
+                        
+                        echo "   Test job submitted: $JOB_NAME"
+                        echo "   Waiting for completion..."
+                        
+                        # Wait for job completion (timeout 15 minutes)
+                        TIMEOUT=900
+                        ELAPSED=0
+                        while [ $ELAPSED -lt $TIMEOUT ]; do
+                          STATUS=$(az ml job show \
+                            --name $JOB_NAME \
+                            --workspace-name $(testWorkspaceName) \
+                            --resource-group $(testResourceGroup) \
+                            --query status -o tsv)
+                          
+                          if [ "$STATUS" = "Completed" ]; then
+                            echo "   ✅ Test passed for $ENDPOINT_NAME"
+                            break
+                          elif [ "$STATUS" = "Failed" ]; then
+                            echo "   ❌ Test failed for $ENDPOINT_NAME"
+                            exit 1
+                          fi
+                          
+                          sleep 30
+                          ELAPSED=$((ELAPSED + 30))
+                        done
+                        
+                        if [ $ELAPSED -ge $TIMEOUT ]; then
+                          echo "   ⚠️  Test timeout for $ENDPOINT_NAME"
+                          exit 1
+                        fi
+                      done
+                      
+                      echo ""
+                      echo "✅ All smoke tests passed!"
+
+  # ============================================
+  # Stage 3: Deploy to Production
+  # ============================================
+  - stage: DeployToProduction
+    displayName: 'Deploy to Production'
+    dependsOn: DeployToTest
+    condition: succeeded()
+    jobs:
+      - deployment: DeployProd
+        displayName: 'Deploy models to Production Workspace'
+        environment: 'Production-Approval'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                
+                - task: DownloadPipelineArtifact@2
+                  displayName: 'Download promoted models info'
+                  inputs:
+                    artifactName: 'promoted-models'
+                    targetPath: '$(Pipeline.Workspace)'
+                
+                - task: AzureCLI@2
+                  displayName: 'Deploy models to Production batch endpoints'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "🚀 Deploying models to Production environment..."
+                      
+                      # Read promoted models
+                      CIRCUITS=$(cat $(Pipeline.Workspace)/changed_circuits.json)
+                      
+                      # Deploy each model to batch endpoint
+                      echo "$CIRCUITS" | jq -c '.[]' | while read circuit; do
+                        MODEL_NAME=$(echo $circuit | jq -r '.model_name')
+                        PLANT_ID=$(echo $circuit | jq -r '.plant_id')
+                        CIRCUIT_ID=$(echo $circuit | jq -r '.circuit_id')
+                        CUTOFF_DATE=$(echo $circuit | jq -r '.cutoff_date')
+                        
+                        # Endpoint name: be-{plant}-{circuit}
+                        ENDPOINT_NAME="be-${PLANT_ID,,}-${CIRCUIT_ID,,}"
+                        
+                        echo ""
+                        echo "🎯 Deploying $MODEL_NAME to Production endpoint: $ENDPOINT_NAME"
+                        
+                        # Get model version from registry
+                        MODEL_VERSION=$(az ml model list \
+                          --registry-name $(registryName) \
+                          --name $MODEL_NAME \
+                          --tag release_id=$(Build.BuildNumber) \
+                          --query "[0].version" \
+                          -o tsv)
+                        
+                        if [ -z "$MODEL_VERSION" ]; then
+                          echo "⚠️  Model not found in registry: $MODEL_NAME"
+                          continue
+                        fi
+                        
+                        # Check if endpoint exists
+                        ENDPOINT_EXISTS=$(az ml batch-endpoint show \
+                          --name $ENDPOINT_NAME \
+                          --workspace-name $(prodWorkspaceName) \
+                          --resource-group $(prodResourceGroup) \
+                          --query name -o tsv 2>/dev/null || echo "not_found")
+                        
+                        if [ "$ENDPOINT_EXISTS" = "not_found" ]; then
+                          echo "   Creating batch endpoint: $ENDPOINT_NAME"
+                          az ml batch-endpoint create \
+                            --name $ENDPOINT_NAME \
+                            --workspace-name $(prodWorkspaceName) \
+                            --resource-group $(prodResourceGroup) \
+                            --description "Batch endpoint for $PLANT_ID $CIRCUIT_ID (Production)"
+                        else
+                          echo "   Endpoint exists: $ENDPOINT_NAME"
+                        fi
+                        
+                        # Get current default deployment (for rollback tracking)
+                        PREVIOUS_DEPLOYMENT=$(az ml batch-endpoint show \
+                          --name $ENDPOINT_NAME \
+                          --workspace-name $(prodWorkspaceName) \
+                          --resource-group $(prodResourceGroup) \
+                          --query defaults.deployment_name -o tsv 2>/dev/null || echo "none")
+                        
+                        # Create new deployment
+                        DEPLOYMENT_NAME="deployment-$(Build.BuildNumber)"
+                        echo "   Creating deployment: $DEPLOYMENT_NAME"
+                        echo "   Previous deployment: $PREVIOUS_DEPLOYMENT"
+                        
+                        az ml batch-deployment create \
+                          --name $DEPLOYMENT_NAME \
+                          --endpoint-name $ENDPOINT_NAME \
+                          --model azureml://registries/$(registryName)/models/$MODEL_NAME/versions/$MODEL_VERSION \
+                          --compute-target batch-cluster \
+                          --instance-count 2 \
+                          --max-concurrency-per-instance 4 \
+                          --mini-batch-size 10 \
+                          --output-action append_row \
+                          --set-default \
+                          --workspace-name $(prodWorkspaceName) \
+                          --resource-group $(prodResourceGroup) \
+                          --set tags.cutoff_date=$CUTOFF_DATE \
+                          --set tags.release_id=$(Build.BuildNumber) \
+                          --set tags.deployed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+                          --set tags.previous_deployment=$PREVIOUS_DEPLOYMENT \
+                          || echo "⚠️  Deployment failed for $MODEL_NAME"
+                        
+                        echo "✅ Deployed $MODEL_NAME:$MODEL_VERSION to Production"
+                      done
+                      
+                      echo ""
+                      echo "📋 Production deployments:"
+                      az ml batch-endpoint list \
+                        --workspace-name $(prodWorkspaceName) \
+                        --resource-group $(prodResourceGroup) \
+                        --output table
+                
+                - task: AzureCLI@2
+                  displayName: 'Verify production deployments'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "✅ Verifying production deployments..."
+                      
+                      CIRCUITS=$(cat $(Pipeline.Workspace)/changed_circuits.json)
+                      
+                      echo "$CIRCUITS" | jq -c '.[]' | while read circuit; do
+                        PLANT_ID=$(echo $circuit | jq -r '.plant_id')
+                        CIRCUIT_ID=$(echo $circuit | jq -r '.circuit_id')
+                        ENDPOINT_NAME="be-${PLANT_ID,,}-${CIRCUIT_ID,,}"
+                        
+                        echo ""
+                        echo "🔍 Verifying endpoint: $ENDPOINT_NAME"
+                        
+                        # Check endpoint status
+                        ENDPOINT_STATUS=$(az ml batch-endpoint show \
+                          --name $ENDPOINT_NAME \
+                          --workspace-name $(prodWorkspaceName) \
+                          --resource-group $(prodResourceGroup) \
+                          --query provisioning_state -o tsv)
+                        
+                        if [ "$ENDPOINT_STATUS" = "Succeeded" ]; then
+                          echo "   ✅ Endpoint provisioned successfully"
+                        else
+                          echo "   ❌ Endpoint provisioning failed: $ENDPOINT_STATUS"
+                          exit 1
+                        fi
+                        
+                        # Get default deployment
+                        DEFAULT_DEPLOYMENT=$(az ml batch-endpoint show \
+                          --name $ENDPOINT_NAME \
+                          --workspace-name $(prodWorkspaceName) \
+                          --resource-group $(prodResourceGroup) \
+                          --query defaults.deployment_name -o tsv)
+                        
+                        echo "   Default deployment: $DEFAULT_DEPLOYMENT"
+                      done
+                      
+                      echo ""
+                      echo "✅ All production deployments verified!"
+                
+                - script: |
+                    echo ""
+                    echo "================================================"
+                    echo "✅ Production Deployment Complete!"
+                    echo "================================================"
+                    echo "Release ID: $(Build.BuildNumber)"
+                    echo "Build ID: $(Build.BuildId)"
+                    echo "Deployed At: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                    echo ""
+                    echo "📋 Deployed Circuits:"
+                    cat $(Pipeline.Workspace)/changed_circuits.json | jq -r '.[] | "   - \(.plant_id) / \(.circuit_id) → \(.model_name)"'
+                    echo ""
+                    echo "🔗 Workspace: $(prodWorkspaceName)"
+                    echo "================================================"
+                  displayName: 'Deployment Summary'

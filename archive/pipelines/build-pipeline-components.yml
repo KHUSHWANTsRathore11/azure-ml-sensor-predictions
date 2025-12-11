@@ -1,0 +1,321 @@
+# Component-Based Build Pipeline with MLTable Registration
+# This pipeline uses reusable Azure ML components
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - config/circuits.yaml
+      - components/**
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - config/circuits.yaml
+
+variables:
+  - group: mlops-dev-variables
+  - name: dataVersion
+    value: $[format('{0:yyyy-MM-dd}', pipeline.startTime)]
+
+stages:
+  # ============================================
+  # Stage 1: Register/Update Components
+  # ============================================
+  - stage: RegisterComponents
+    displayName: 'Register Components to Workspace'
+    jobs:
+      - job: RegisterAllComponents
+        displayName: 'Register all component definitions'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+          
+          - task: AzureCLI@2
+            displayName: 'Register Training Components'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "📦 Registering training components..."
+                
+                # Register train-lstm-model component
+                az ml component create \
+                  --file components/training/train-lstm-model/component.yaml \
+                  --workspace-name $(workspaceName) \
+                  --resource-group $(resourceGroup)
+          
+          - task: AzureCLI@2
+            displayName: 'Register Scoring Components'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "📦 Registering scoring components..."
+                
+                # Register batch-score component
+                az ml component create \
+                  --file components/scoring/batch-score/component.yaml \
+                  --workspace-name $(workspaceName) \
+                  --resource-group $(resourceGroup)
+          
+          - task: AzureCLI@2
+            displayName: 'List registered components'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "📋 Registered components:"
+                az ml component list \
+                  --workspace-name $(workspaceName) \
+                  --resource-group $(resourceGroup) \
+                  --output table
+
+  # ============================================
+  # Stage 2: Detect Circuit Changes
+  # ============================================
+  - stage: DetectChanges
+    displayName: 'Detect Changed Circuits'
+    dependsOn: RegisterComponents
+    jobs:
+      - job: GitDiff
+        displayName: 'Detect circuits changed via git diff'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+            fetchDepth: 0
+          
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.9'
+          
+          - script: |
+              pip install pyyaml
+            displayName: 'Install dependencies'
+          
+          - script: |
+              python scripts/detect_config_changes.py \
+                --target-branch main \
+                --output changed_circuits.json
+              
+              # Display what changed
+              cat changed_circuits.json
+            displayName: 'Detect changed circuits'
+          
+          - script: |
+              # Check if any circuits changed
+              CIRCUIT_COUNT=$(python -c "import json; print(len(json.load(open('changed_circuits.json'))))")
+              echo "Number of changed circuits: $CIRCUIT_COUNT"
+              echo "##vso[task.setvariable variable=circuitCount;isOutput=true]$CIRCUIT_COUNT"
+              
+              if [ "$CIRCUIT_COUNT" -eq 0 ]; then
+                echo "⚠️  No circuits changed"
+              else
+                echo "✅ Training needed for $CIRCUIT_COUNT circuit(s)"
+              fi
+            name: checkChanges
+            displayName: 'Check if training needed'
+          
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: 'changed_circuits.json'
+              artifactName: 'changed-circuits'
+
+  # ============================================
+  # Stage 3: Submit Component-Based Pipeline
+  # ============================================
+  - stage: SubmitTrainingPipeline
+    displayName: 'Submit Training Pipeline'
+    dependsOn: DetectChanges
+    condition: gt(stageDependencies.DetectChanges.GitDiff.outputs['checkChanges.circuitCount'], 0)
+    jobs:
+      - job: SubmitComponentPipeline
+        displayName: 'Submit Azure ML pipeline with components'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+          
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifactName: 'changed-circuits'
+              targetPath: '$(Pipeline.Workspace)'
+          
+          - task: AzureCLI@2
+            displayName: 'Upload changed circuits to datastore'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                # Upload changed circuits file
+                az ml data create \
+                  --name changed-circuits \
+                  --version $(Build.BuildNumber) \
+                  --type uri_file \
+                  --path $(Pipeline.Workspace)/changed_circuits.json \
+                  --workspace-name $(workspaceName) \
+                  --resource-group $(resourceGroup)
+                
+                echo "✅ Changed circuits uploaded"
+          
+          - task: AzureCLI@2
+            displayName: 'Submit component-based training pipeline'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                DATA_VERSION=$(date +%Y-%m-%d)
+                echo "📊 Data Version: $DATA_VERSION"
+                echo "🏗️  Build Number: $(Build.BuildNumber)"
+                
+                # Submit pipeline job with components
+                JOB_NAME=$(az ml job create \
+                  --file pipelines/training-pipeline-components.yaml \
+                  --workspace-name $(workspaceName) \
+                  --resource-group $(resourceGroup) \
+                  --set display_name="ComponentTraining-$(Build.BuildNumber)" \
+                  --set inputs.data_version=$DATA_VERSION \
+                  --set inputs.changed_circuits.path=azureml:changed-circuits:$(Build.BuildNumber) \
+                  --query name -o tsv)
+                
+                echo "🚀 Pipeline submitted: $JOB_NAME"
+                echo "##vso[task.setvariable variable=pipelineJobName]$JOB_NAME"
+                
+                # Stream logs
+                echo "📺 Streaming pipeline execution..."
+                az ml job stream \
+                  --name $JOB_NAME \
+                  --workspace-name $(workspaceName) \
+                  --resource-group $(resourceGroup)
+          
+          - task: AzureCLI@2
+            displayName: 'Check pipeline status'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                STATUS=$(az ml job show \
+                  --name $(pipelineJobName) \
+                  --workspace-name $(workspaceName) \
+                  --resource-group $(resourceGroup) \
+                  --query status -o tsv)
+                
+                echo "Pipeline Status: $STATUS"
+                
+                if [ "$STATUS" = "Completed" ]; then
+                  echo "✅ Training pipeline completed successfully"
+                elif [ "$STATUS" = "Failed" ]; then
+                  echo "❌ Training pipeline failed"
+                  exit 1
+                else
+                  echo "⚠️  Unexpected status: $STATUS"
+                  exit 1
+                fi
+          
+          - task: AzureCLI@2
+            displayName: 'Get pipeline outputs'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "📊 Downloading pipeline outputs..."
+                
+                # Download trained models
+                az ml job download \
+                  --name $(pipelineJobName) \
+                  --output-name trained_models \
+                  --download-path $(Build.ArtifactStagingDirectory)/outputs \
+                  --workspace-name $(workspaceName) \
+                  --resource-group $(resourceGroup) || true
+                
+                # Download metrics
+                az ml job download \
+                  --name $(pipelineJobName) \
+                  --output-name training_metrics \
+                  --download-path $(Build.ArtifactStagingDirectory)/outputs \
+                  --workspace-name $(workspaceName) \
+                  --resource-group $(resourceGroup) || true
+          
+          - task: PublishBuildArtifacts@1
+            inputs:
+              pathToPublish: '$(Build.ArtifactStagingDirectory)/outputs'
+              artifactName: 'pipeline-outputs'
+
+  # ============================================
+  # Stage 4: Register Models to Workspace
+  # ============================================
+  - stage: RegisterModels
+    displayName: 'Register Trained Models'
+    dependsOn: SubmitTrainingPipeline
+    condition: succeeded()
+    jobs:
+      - job: RegisterToWorkspace
+        displayName: 'Register models from pipeline outputs'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: DownloadBuildArtifacts@0
+            inputs:
+              artifactName: 'pipeline-outputs'
+              downloadPath: '$(System.ArtifactsDirectory)'
+          
+          - task: AzureCLI@2
+            displayName: 'Register trained models'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "📦 Registering trained models..."
+                
+                # Find all model directories
+                MODEL_DIR="$(System.ArtifactsDirectory)/pipeline-outputs/trained_models"
+                
+                if [ -d "$MODEL_DIR" ]; then
+                  for model_path in $MODEL_DIR/*; do
+                    if [ -d "$model_path" ]; then
+                      MODEL_NAME=$(basename "$model_path")
+                      echo "Registering model: $MODEL_NAME"
+                      
+                      az ml model create \
+                        --name $MODEL_NAME \
+                        --path $model_path \
+                        --type mlflow_model \
+                        --workspace-name $(workspaceName) \
+                        --resource-group $(resourceGroup) \
+                        || echo "⚠️  Failed to register $MODEL_NAME"
+                    fi
+                  done
+                  
+                  echo "✅ Model registration complete"
+                else
+                  echo "⚠️  No models found in output directory"
+                fi
+          
+          - task: AzureCLI@2
+            displayName: 'List registered models'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "📋 Recently registered models:"
+                az ml model list \
+                  --workspace-name $(workspaceName) \
+                  --resource-group $(resourceGroup) \
+                  --max-results 20 \
+                  --output table

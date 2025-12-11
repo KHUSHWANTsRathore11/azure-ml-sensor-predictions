@@ -1,0 +1,132 @@
+# Environment-Only Release Pipeline
+# For non-breaking environment changes (e.g., bug fixes, minor updates)
+
+trigger: none
+
+parameters:
+  - name: newEnvironmentVersion
+    displayName: 'New Environment Version'
+    type: string
+  - name: testAllModels
+    displayName: 'Test All Models (75-200)'
+    type: boolean
+    default: true
+
+variables:
+  - group: mlops-shared-variables
+
+stages:
+  # Stage 1: Test New Environment
+  - stage: TestEnvironment
+    displayName: 'Test New Environment'
+    jobs:
+      - job: TestAllModels
+        displayName: 'Test all 75-200 models with new environment'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: AzureCLI@2
+            displayName: 'Create test environment'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az ml environment create \
+                  --name sensor-forecasting-env \
+                  --version ${{ parameters.newEnvironmentVersion }} \
+                  --file config/environment.yaml \
+                  --workspace-name $(testWorkspaceName)
+          
+          - task: AzureCLI@2
+            displayName: 'Test sample predictions with all models'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'scriptPath'
+              scriptPath: 'tests/test_all_models.sh'
+              arguments: '$(testWorkspaceName) ${{ parameters.newEnvironmentVersion }}'
+
+  # Stage 2: Update Test Deployments
+  - stage: UpdateTestDeployments
+    displayName: 'Update Test Environment Deployments'
+    dependsOn: TestEnvironment
+    condition: succeeded()
+    jobs:
+      - job: UpdateTest
+        displayName: 'Update all Test deployments'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: AzureCLI@2
+            displayName: 'Update Test batch endpoints'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                # Update all deployments with new environment
+                python scripts/update_all_deployments.py \
+                  --workspace $(testWorkspaceName) \
+                  --environment-version ${{ parameters.newEnvironmentVersion }} \
+                  --resource-group $(resourceGroup)
+
+  # Stage 3: Update Production Deployments
+  - stage: UpdateProductionDeployments
+    displayName: 'Update Production Environment'
+    dependsOn: UpdateTestDeployments
+    condition: succeeded()
+    jobs:
+      - deployment: UpdateProd
+        displayName: 'Update Production deployments'
+        environment: 'Production-Approval'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureCLI@2
+                  displayName: 'Create Production environment'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      az ml environment create \
+                        --name sensor-forecasting-env \
+                        --version ${{ parameters.newEnvironmentVersion }} \
+                        --file config/environment.yaml \
+                        --workspace-name $(prodWorkspaceName)
+                
+                - task: AzureCLI@2
+                  displayName: 'Update all Production batch endpoints'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      python scripts/update_all_deployments.py \
+                        --workspace $(prodWorkspaceName) \
+                        --environment-version ${{ parameters.newEnvironmentVersion }} \
+                        --resource-group $(resourceGroup)
+                
+                - script: |
+                    echo "✅ Environment updated across all deployments!"
+                    echo "New version: ${{ parameters.newEnvironmentVersion }}"
+                  displayName: 'Update summary'
+
+  # Stage 4: Rollback (if needed)
+  - stage: Rollback
+    displayName: 'Rollback (Manual)'
+    dependsOn: UpdateProductionDeployments
+    condition: failed()
+    jobs:
+      - job: RollbackEnvironment
+        displayName: 'Rollback to previous environment'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - script: |
+              echo "⚠️ Rollback required - use Azure DevOps Releases to redeploy previous version"
+            displayName: 'Rollback instructions'

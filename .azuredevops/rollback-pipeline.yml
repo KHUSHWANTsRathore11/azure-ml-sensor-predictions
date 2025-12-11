@@ -1,0 +1,363 @@
+# Rollback Pipeline - Quick Production Rollback
+# Manually triggered to rollback batch endpoint deployments to previous version
+
+trigger: none  # Manual trigger only
+
+parameters:
+  - name: circuitIds
+    displayName: 'Circuits to Rollback (comma-separated)'
+    type: string
+    default: 'PLANT001_CIRCUIT01'
+  
+  - name: environment
+    displayName: 'Target Environment'
+    type: string
+    default: 'Production'
+    values:
+      - Dev
+      - Test
+      - Production
+  
+  - name: sourceBranch
+    displayName: 'Source Branch Context'
+    type: string
+    default: 'main'
+    values:
+      - develop
+      - release
+      - main
+  
+  - name: rollbackType
+    displayName: 'Rollback Type'
+    type: string
+    default: 'previous'
+    values:
+      - previous  # Use previous_deployment tag
+      - specific  # Specify deployment name
+  
+  - name: specificDeployment
+    displayName: 'Specific Deployment Name (if rollbackType=specific)'
+    type: string
+    default: ''
+
+variables:
+  - group: mlops-test-variables
+  - group: mlops-prod-variables
+
+stages:
+  - stage: RollbackConfirmation
+    displayName: 'Validate Rollback Request'
+    jobs:
+      - job: ValidateRequest
+        displayName: 'Validate circuits and deployment status'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+          
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.9'
+          
+          - script: |
+              pip install pyyaml
+            displayName: 'Install dependencies'
+          
+          - script: |
+              echo "🔍 Validating rollback request..."
+              echo "Circuits: ${{ parameters.circuitIds }}"
+              echo "Environment: ${{ parameters.environment }}"
+              echo "Rollback Type: ${{ parameters.rollbackType }}"
+              
+              # Parse circuit IDs
+              IFS=',' read -ra CIRCUITS <<< "${{ parameters.circuitIds }}"
+              
+              # Generate validation report
+              cat > rollback_plan.json << EOF
+              {
+                "circuits": [
+              EOF
+              
+              first=true
+              for circuit in "${CIRCUITS[@]}"; do
+                circuit=$(echo $circuit | xargs)  # trim whitespace
+                plant_id=$(echo $circuit | cut -d'_' -f1)
+                circuit_id=$(echo $circuit | cut -d'_' -f2)
+                
+                if [ "$first" = true ]; then
+                  first=false
+                else
+                  echo "," >> rollback_plan.json
+                fi
+                
+                cat >> rollback_plan.json << EOF
+                  {
+                    "plant_id": "$plant_id",
+                    "circuit_id": "$circuit_id",
+                    "endpoint_name": "be-${plant_id,,}-${circuit_id,,}"
+                  }
+EOF
+              done
+              
+              cat >> rollback_plan.json << EOF
+              
+                ],
+                "environment": "${{ parameters.environment }}",
+                "rollback_type": "${{ parameters.rollbackType }}",
+                "specific_deployment": "${{ parameters.specificDeployment }}",
+                "requested_by": "$(Build.RequestedFor)",
+                "requested_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              }
+EOF
+              
+              echo ""
+              echo "📋 Rollback Plan:"
+              cat rollback_plan.json
+              
+              # Validate JSON
+              python3 -c "import json; json.load(open('rollback_plan.json'))"
+              
+            displayName: 'Generate Rollback Plan'
+          
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: 'rollback_plan.json'
+              artifactName: 'rollback-plan'
+
+  - stage: ExecuteRollback
+    displayName: 'Execute Rollback'
+    dependsOn: RollbackConfirmation
+    condition: succeeded()
+    jobs:
+      - deployment: RollbackDeployments
+        displayName: 'Rollback Batch Endpoint Deployments'
+        environment: ${{ parameters.environment }}-Rollback-Approval
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: rollback-plan
+                
+                - task: AzureCLI@2
+                  displayName: 'Execute Rollback'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "🔄 Executing rollback to ${{ parameters.environment }}..."
+                      
+                      # Set workspace based on environment
+                      if [ "${{ parameters.environment }}" = "Production" ]; then
+                        WORKSPACE_NAME=$(prodWorkspaceName)
+                        RESOURCE_GROUP=$(prodResourceGroup)
+                      else
+                        WORKSPACE_NAME=$(testWorkspaceName)
+                        RESOURCE_GROUP=$(testResourceGroup)
+                      fi
+                      
+                      echo "Workspace: $WORKSPACE_NAME"
+                      echo "Resource Group: $RESOURCE_GROUP"
+                      echo ""
+                      
+                      # Read rollback plan
+                      CIRCUITS=$(cat $(Pipeline.Workspace)/rollback-plan/rollback_plan.json | jq -c '.circuits[]')
+                      
+                      # Execute rollback for each circuit
+                      echo "$CIRCUITS" | while read circuit; do
+                        ENDPOINT_NAME=$(echo $circuit | jq -r '.endpoint_name')
+                        PLANT_ID=$(echo $circuit | jq -r '.plant_id')
+                        CIRCUIT_ID=$(echo $circuit | jq -r '.circuit_id')
+                        
+                        echo ""
+                        echo "=========================================="
+                        echo "🔄 Rolling back: $PLANT_ID / $CIRCUIT_ID"
+                        echo "   Endpoint: $ENDPOINT_NAME"
+                        echo "=========================================="
+                        
+                        # Get current default deployment
+                        CURRENT_DEPLOYMENT=$(az ml batch-endpoint show \
+                          --name $ENDPOINT_NAME \
+                          --workspace-name $WORKSPACE_NAME \
+                          --resource-group $RESOURCE_GROUP \
+                          --query defaults.deployment_name -o tsv 2>/dev/null)
+                        
+                        if [ -z "$CURRENT_DEPLOYMENT" ] || [ "$CURRENT_DEPLOYMENT" = "null" ]; then
+                          echo "❌ No current deployment found for $ENDPOINT_NAME"
+                          continue
+                        fi
+                        
+                        echo "   Current deployment: $CURRENT_DEPLOYMENT"
+                        
+                        # Determine target deployment
+                        if [ "${{ parameters.rollbackType }}" = "specific" ]; then
+                          TARGET_DEPLOYMENT="${{ parameters.specificDeployment }}"
+                          echo "   Target deployment: $TARGET_DEPLOYMENT (specified)"
+                        else
+                          # Get previous deployment from current deployment tags
+                          TARGET_DEPLOYMENT=$(az ml batch-deployment show \
+                            --name $CURRENT_DEPLOYMENT \
+                            --endpoint-name $ENDPOINT_NAME \
+                            --workspace-name $WORKSPACE_NAME \
+                            --resource-group $RESOURCE_GROUP \
+                            --query tags.previous_deployment -o tsv 2>/dev/null)
+                          
+                          if [ -z "$TARGET_DEPLOYMENT" ] || [ "$TARGET_DEPLOYMENT" = "null" ]; then
+                            echo "❌ No previous deployment found in tags"
+                            
+                            # Fallback: List all deployments and get second newest
+                            echo "   Attempting to find previous deployment..."
+                            TARGET_DEPLOYMENT=$(az ml batch-deployment list \
+                              --endpoint-name $ENDPOINT_NAME \
+                              --workspace-name $WORKSPACE_NAME \
+                              --resource-group $RESOURCE_GROUP \
+                              --query "[?name!='$CURRENT_DEPLOYMENT'] | [0].name" -o tsv)
+                            
+                            if [ -z "$TARGET_DEPLOYMENT" ] || [ "$TARGET_DEPLOYMENT" = "null" ]; then
+                              echo "❌ No alternative deployment available for rollback"
+                              continue
+                            fi
+                          fi
+                          
+                          echo "   Target deployment: $TARGET_DEPLOYMENT (previous)"
+                        fi
+                        
+                        # Verify target deployment exists
+                        TARGET_EXISTS=$(az ml batch-deployment show \
+                          --name $TARGET_DEPLOYMENT \
+                          --endpoint-name $ENDPOINT_NAME \
+                          --workspace-name $WORKSPACE_NAME \
+                          --resource-group $RESOURCE_GROUP \
+                          --query name -o tsv 2>/dev/null)
+                        
+                        if [ -z "$TARGET_EXISTS" ] || [ "$TARGET_EXISTS" = "null" ]; then
+                          echo "❌ Target deployment not found: $TARGET_DEPLOYMENT"
+                          continue
+                        fi
+                        
+                        echo "   ✅ Target deployment verified"
+                        
+                        # Perform rollback by updating default deployment
+                        echo "   🔄 Switching default deployment..."
+                        az ml batch-endpoint update \
+                          --name $ENDPOINT_NAME \
+                          --workspace-name $WORKSPACE_NAME \
+                          --resource-group $RESOURCE_GROUP \
+                          --set defaults.deployment_name=$TARGET_DEPLOYMENT
+                        
+                        # Verify rollback
+                        NEW_DEFAULT=$(az ml batch-endpoint show \
+                          --name $ENDPOINT_NAME \
+                          --workspace-name $WORKSPACE_NAME \
+                          --resource-group $RESOURCE_GROUP \
+                          --query defaults.deployment_name -o tsv)
+                        
+                        if [ "$NEW_DEFAULT" = "$TARGET_DEPLOYMENT" ]; then
+                          echo "   ✅ Rollback successful!"
+                          echo "      Old: $CURRENT_DEPLOYMENT"
+                          echo "      New: $NEW_DEFAULT"
+                        else
+                          echo "   ❌ Rollback verification failed"
+                          echo "      Expected: $TARGET_DEPLOYMENT"
+                          echo "      Got: $NEW_DEFAULT"
+                          exit 1
+                        fi
+                      done
+                      
+                      echo ""
+                      echo "=========================================="
+                      echo "✅ Rollback Complete!"
+                      echo "=========================================="
+                
+                - task: AzureCLI@2
+                  displayName: 'Verify Rollback (Smoke Test)'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "🧪 Running post-rollback smoke tests..."
+                      
+                      # Set workspace based on environment
+                      if [ "${{ parameters.environment }}" = "Production" ]; then
+                        WORKSPACE_NAME=$(prodWorkspaceName)
+                        RESOURCE_GROUP=$(prodResourceGroup)
+                      else
+                        WORKSPACE_NAME=$(testWorkspaceName)
+                        RESOURCE_GROUP=$(testResourceGroup)
+                      fi
+                      
+                      # Read rollback plan
+                      CIRCUITS=$(cat $(Pipeline.Workspace)/rollback-plan/rollback_plan.json | jq -c '.circuits[]')
+                      
+                      echo "$CIRCUITS" | while read circuit; do
+                        ENDPOINT_NAME=$(echo $circuit | jq -r '.endpoint_name')
+                        PLANT_ID=$(echo $circuit | jq -r '.plant_id')
+                        CIRCUIT_ID=$(echo $circuit | jq -r '.circuit_id')
+                        
+                        echo ""
+                        echo "🔍 Testing endpoint: $ENDPOINT_NAME"
+                        
+                        # Invoke endpoint with test data
+                        JOB_NAME=$(az ml batch-endpoint invoke \
+                          --name $ENDPOINT_NAME \
+                          --input azureml://datastores/workspaceblobstore/paths/test-data/$PLANT_ID/$CIRCUIT_ID/ \
+                          --workspace-name $WORKSPACE_NAME \
+                          --resource-group $RESOURCE_GROUP \
+                          --query name -o tsv 2>/dev/null)
+                        
+                        if [ -z "$JOB_NAME" ]; then
+                          echo "   ⚠️  Could not invoke endpoint (test data may not exist)"
+                          continue
+                        fi
+                        
+                        echo "   Test job submitted: $JOB_NAME"
+                        echo "   Waiting for completion (max 5 minutes)..."
+                        
+                        # Wait for job completion (timeout 5 minutes for quick verification)
+                        TIMEOUT=300
+                        ELAPSED=0
+                        while [ $ELAPSED -lt $TIMEOUT ]; do
+                          STATUS=$(az ml job show \
+                            --name $JOB_NAME \
+                            --workspace-name $WORKSPACE_NAME \
+                            --resource-group $RESOURCE_GROUP \
+                            --query status -o tsv)
+                          
+                          if [ "$STATUS" = "Completed" ]; then
+                            echo "   ✅ Smoke test passed"
+                            break
+                          elif [ "$STATUS" = "Failed" ]; then
+                            echo "   ❌ Smoke test failed - rollback may have issues!"
+                            exit 1
+                          fi
+                          
+                          sleep 30
+                          ELAPSED=$((ELAPSED + 30))
+                        done
+                        
+                        if [ $ELAPSED -ge $TIMEOUT ]; then
+                          echo "   ⚠️  Smoke test timeout (job still running)"
+                        fi
+                      done
+                      
+                      echo ""
+                      echo "✅ Smoke tests complete!"
+                
+                - script: |
+                    echo ""
+                    echo "=========================================="
+                    echo "📋 Rollback Summary"
+                    echo "=========================================="
+                    echo "Environment: ${{ parameters.environment }}"
+                    echo "Rollback Type: ${{ parameters.rollbackType }}"
+                    echo "Executed By: $(Build.RequestedFor)"
+                    echo "Executed At: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                    echo ""
+                    echo "Circuits Rolled Back:"
+                    cat $(Pipeline.Workspace)/rollback-plan/rollback_plan.json | jq -r '.circuits[] | "   - \(.plant_id) / \(.circuit_id) → \(.endpoint_name)"'
+                    echo "=========================================="
+                  displayName: 'Rollback Summary'

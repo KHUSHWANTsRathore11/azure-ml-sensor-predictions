@@ -37,12 +37,27 @@ Add the following variables to the group:
 |--------------|-------|-------------|
 | `monitoringMaxWaitHours` | `3` | Training job timeout (hours) |
 | `monitoringPollIntervalSeconds` | `30` | How often to check job status |
+| `registryName` | `mlops-central-registry` | Name of the Azure ML Registry |
+| `registryResourceGroup` | `mlops-registry-rg` | Resource group for registry |
+| `registryPropagationMaxWaitSeconds` | `120` | Max time to wait for model to appear in registry after sharing |
+| `registryPropagationInitialDelaySeconds` | `2` | Initial delay before first retry (exponential backoff) |
+| `registryPropagationMaxDelaySeconds` | `30` | Maximum delay between retries (exponential backoff cap) |
 | `monitoringLogLevel` | `DEBUG` | Log verbosity (DEBUG/INFO/WARNING) |
 
-#### Validation Settings
+**Note:** The propagation settings use exponential backoff:
+- Attempt 1: Wait 2s
+- Attempt 2: Wait 4s
+- Attempt 3: Wait 8s
+- Attempt 4: Wait 16s
+- Attempt 5+: Wait 30s (capped)
+- Total max wait: 120s
 
-| Variable Name | Value | Description |
-|--------------|-------|-------------|
+### mlops-pipeline-settings
+
+Pipeline execution settings for Dev environment (training).
+
+| Variable | Description | Example Value |
+|----------|-------------|---------------|
 | `validationMinAccuracy` | `0.70` | Minimum model accuracy for PR validation |
 | `validationMaxMae` | `10.0` | Maximum Mean Absolute Error |
 | `validationMaxRmse` | `15.0` | Maximum Root Mean Square Error |

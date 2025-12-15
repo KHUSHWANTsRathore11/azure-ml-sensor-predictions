@@ -86,9 +86,6 @@ stages:
                     inlineScript: |
                       echo "🚀 Promoting model to registry..."
                       
-                      # Build model URI from Dev workspace
-                      MODEL_URI="azureml://subscriptions/$(subscriptionId)/resourceGroups/$(resourceGroup)/workspaces/$(workspaceName)/models/${{ parameters.modelName }}/versions/${{ parameters.modelVersion }}"
-                      
                       # Check if already exists in registry
                       if az ml model show \
                         --name "${{ parameters.modelName }}" \
@@ -99,35 +96,71 @@ stages:
                         exit 0
                       fi
                       
-                      # Promote to registry
-                      az ml model create \
+                      # Share model to registry (preserves lineage)
+                      echo "Sharing ${{ parameters.modelName }}:v${{ parameters.modelVersion }} to registry..."
+                      echo "Using --share to preserve lineage and maintain single source of truth"
+                      
+                      az ml model share \
                         --name "${{ parameters.modelName }}" \
                         --version "${{ parameters.modelVersion }}" \
-                        --path "$MODEL_URI" \
+                        --workspace-name "$(workspaceName)" \
+                        --resource-group "$(resourceGroup)" \
                         --registry-name "$(registryName)" \
-                        --resource-group "$(registryResourceGroup)" \
-                        --set "tags.plant_id=${{ parameters.plantId }}" \
-                        --set "tags.circuit_id=${{ parameters.circuitId }}" \
-                        --set "tags.cutoff_date=${{ parameters.cutoffDate }}" \
-                        --set "tags.training_hash=${{ parameters.trainingHash }}" \
-                        --set "tags.promoted_from=dev" \
-                        -o json
+                        --share-with-name "${{ parameters.modelName }}" \
+                        --share-with-version "${{ parameters.modelVersion }}"
                       
                       if [ $? -eq 0 ]; then
-                        echo "✅ Model promoted successfully"
+                        echo "✅ Model shared successfully (lineage preserved)"
                         
-                        # Verify
-                        if az ml model show \
+                        # Wait for model to appear in registry with exponential backoff
+                        echo "⏳ Waiting for model to be available in registry..."
+                        
+                        # Get settings from Variable Groups (with defaults)
+                        MAX_WAIT_SECONDS=${registryPropagationMaxWaitSeconds:-120}
+                        INITIAL_DELAY=${registryPropagationInitialDelaySeconds:-2}
+                        MAX_DELAY=${registryPropagationMaxDelaySeconds:-30}
+                        
+                        echo "Settings: max_wait=${MAX_WAIT_SECONDS}s, initial_delay=${INITIAL_DELAY}s, max_delay=${MAX_DELAY}s"
+                        
+                        ELAPSED=0
+                        CURRENT_DELAY=$INITIAL_DELAY
+                        ATTEMPT=1
+                        
+                        while [ $ELAPSED -lt $MAX_WAIT_SECONDS ]; do
+                          if az ml model show \
+                            --name "${{ parameters.modelName }}" \
+                            --version "${{ parameters.modelVersion }}" \
+                            --registry-name "$(registryName)" \
+                            --resource-group "$(registryResourceGroup)" &>/dev/null; then
+                            echo "✅ Verified in registry (after ${ELAPSED}s, attempt $ATTEMPT)"
+                            echo "🔗 Lineage maintained: Registry model points to workspace model"
+                            break
+                          fi
+                          
+                          echo "   Attempt $ATTEMPT: Not found yet, waiting ${CURRENT_DELAY}s..."
+                          sleep $CURRENT_DELAY
+                          ELAPSED=$((ELAPSED + CURRENT_DELAY))
+                          
+                          # Exponential backoff: double delay up to max
+                          CURRENT_DELAY=$((CURRENT_DELAY * 2))
+                          if [ $CURRENT_DELAY -gt $MAX_DELAY ]; then
+                            CURRENT_DELAY=$MAX_DELAY
+                          fi
+                          
+                          ATTEMPT=$((ATTEMPT + 1))
+                        done
+                        
+                        # Check if we exited due to timeout
+                        if ! az ml model show \
                           --name "${{ parameters.modelName }}" \
                           --version "${{ parameters.modelVersion }}" \
                           --registry-name "$(registryName)" \
                           --resource-group "$(registryResourceGroup)" &>/dev/null; then
-                          echo "✅ Verified in registry"
-                        else
-                          echo "⚠️  Promoted but verification failed"
+                          echo "⚠️  Model shared but not visible in registry after ${MAX_WAIT_SECONDS}s"
+                          echo "⚠️  This may be a propagation delay - check registry manually"
                           exit 1
                         fi
                       else
-                        echo "❌ Promotion failed"
+                        echo "❌ Share failed"
                         exit 1
                       fi

@@ -333,6 +333,12 @@ stages:
           - script: |
               echo "🚀 [SIMULATED] Triggering child pipelines for model promotions..."
               echo ""
+              echo "In real pipeline, this would:"
+              echo "  1. Call Azure DevOps REST API"
+              echo "  2. Trigger 'promote-single-model-pipeline' for each model"
+              echo "  3. Pass model parameters to each child pipeline"
+              echo "  4. Each child pipeline waits for approval independently"
+              echo ""
               
               cat $(Pipeline.Workspace)/registered_models.json | python3 -c "
               import json, sys
@@ -342,13 +348,39 @@ stages:
               print(f'Models ready for promotion: {len(models)}')
               print()
               
-              for model in models:
-                  print(f\"  📦 [SIMULATED] Triggered child pipeline for: {model['model_name']}:v{model['version']}\")
-                  print(f\"     Plant: {model['plant_id']}, Circuit: {model['circuit_id']}\")
-                  print(f\"     [SIMULATED] Pipeline URL: https://dev.azure.com/.../pipelines/runs/12345\")
+              for idx, model in enumerate(models, 1):
+                  print(f\"📦 Model {idx}/{len(models)}: {model['model_name']}:v{model['version']}\")
+                  print(f\"   Plant: {model['plant_id']}, Circuit: {model['circuit_id']}\")
+                  print(f\"   Training Hash: {model['training_hash']}\")
+                  print()
+                  print(f\"   [SIMULATED] Triggering child pipeline...\")
+                  print(f\"   [SIMULATED] Child Pipeline ID: dummy-promote-single-model-pipeline\")
+                  print(f\"   [SIMULATED] Parameters:\")
+                  print(f\"     - modelName: {model['model_name']}\")
+                  print(f\"     - modelVersion: {model['version']}\")
+                  print(f\"     - plantId: {model['plant_id']}\")
+                  print(f\"     - circuitId: {model['circuit_id']}\")
+                  print(f\"     - trainingHash: {model['training_hash']}\")
+                  print(f\"     - cutoffDate: {model['cutoff_date']}\")
+                  print()
+                  print(f\"   ✅ [SIMULATED] Child pipeline triggered successfully\")
+                  print(f\"   🔗 [SIMULATED] Pipeline URL: https://dev.azure.com/org/project/_build/results?buildId=1234{idx}\")
+                  print(f\"   ⏸️  [SIMULATED] Waiting for approval in 'dummy-approval' environment\")
+                  print()
+                  print('─' * 60)
                   print()
               "
               
-              echo "✅ [SIMULATED] All child pipelines triggered"
+              echo ""
+              echo "✅ [SIMULATED] All child pipelines triggered successfully"
               echo "📌 [SIMULATED] Each model awaiting individual approval"
+              echo ""
+              echo "Next steps (in real pipeline):"
+              echo "  1. Go to Pipelines → Environments → dummy-approval"
+              echo "  2. Review each pending approval"
+              echo "  3. Approve or reject each model individually"
+              echo "  4. Approved models will be promoted to registry"
+              echo ""
+              echo "Note: Parent pipeline completes here."
+              echo "Child pipelines run independently and can be approved at different times."
             displayName: 'Simulate Child Pipeline Triggers'

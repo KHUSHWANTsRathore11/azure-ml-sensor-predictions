@@ -1,0 +1,115 @@
+# Dummy Single Model Promotion Pipeline
+# 
+# This simulates the child pipeline for promoting a single model with approval.
+# Use this to test the per-model approval workflow.
+
+parameters:
+  - name: modelName
+    type: string
+    displayName: 'Model Name'
+  
+  - name: modelVersion
+    type: string
+    displayName: 'Model Version'
+  
+  - name: plantId
+    type: string
+    displayName: 'Plant ID'
+  
+  - name: circuitId
+    type: string
+    displayName: 'Circuit ID'
+  
+  - name: trainingHash
+    type: string
+    displayName: 'Training Hash'
+  
+  - name: cutoffDate
+    type: string
+    displayName: 'Cutoff Date'
+  
+  - name: simulatePropagationDelay
+    type: number
+    displayName: 'Simulate Propagation Delay (seconds)'
+    default: 10
+
+variables:
+  - name: modelDisplayName
+    value: '${{ parameters.plantId }}/${{ parameters.circuitId }} - ${{ parameters.modelName }}:v${{ parameters.modelVersion }}'
+
+stages:
+  - stage: ApprovePromotion
+    displayName: 'Approve Model Promotion'
+    jobs:
+      - deployment: ApproveModel
+        displayName: 'Approve: ${{ parameters.modelName }}'
+        # Use dummy approval environment for testing
+        environment: 'dummy-approval'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - script: |
+                    echo "╔════════════════════════════════════════════════════════════╗"
+                    echo "║   [SIMULATED] MODEL PROMOTION APPROVAL REQUEST            ║"
+                    echo "╚════════════════════════════════════════════════════════════╝"
+                    echo ""
+                    echo "Plant:         ${{ parameters.plantId }}"
+                    echo "Circuit:       ${{ parameters.circuitId }}"
+                    echo "Model:         ${{ parameters.modelName }}"
+                    echo "Version:       ${{ parameters.modelVersion }}"
+                    echo "Training Hash: ${{ parameters.trainingHash }}"
+                    echo "Cutoff Date:   ${{ parameters.cutoffDate }}"
+                    echo ""
+                    echo "[SIMULATED] This model will be promoted to the shared Azure ML Registry"
+                    echo "[SIMULATED] for deployment to Test and Production environments."
+                    echo ""
+                    echo "⏸️  Waiting for approval..."
+                  displayName: 'Show Model Details'
+                
+                - script: |
+                    echo ""
+                    echo "✅ [SIMULATED] Approval granted!"
+                    echo ""
+                    echo "🚀 [SIMULATED] Sharing model to registry..."
+                    sleep 2
+                    echo "✅ [SIMULATED] Model shared successfully (lineage preserved)"
+                    echo ""
+                    
+                    # Simulate registry propagation delay with exponential backoff
+                    DELAY=${{ parameters.simulatePropagationDelay }}
+                    echo "⏳ [SIMULATED] Waiting for model to be available in registry..."
+                    echo "Settings: max_wait=120s, initial_delay=2s, max_delay=30s"
+                    echo ""
+                    
+                    ELAPSED=0
+                    CURRENT_DELAY=2
+                    ATTEMPT=1
+                    
+                    while [ $ELAPSED -lt $DELAY ]; do
+                      WAIT_TIME=$CURRENT_DELAY
+                      if [ $((ELAPSED + CURRENT_DELAY)) -gt $DELAY ]; then
+                        WAIT_TIME=$((DELAY - ELAPSED))
+                      fi
+                      
+                      echo "   Attempt $ATTEMPT: Not found yet, waiting ${WAIT_TIME}s..."
+                      sleep $WAIT_TIME
+                      ELAPSED=$((ELAPSED + WAIT_TIME))
+                      
+                      # Exponential backoff
+                      CURRENT_DELAY=$((CURRENT_DELAY * 2))
+                      if [ $CURRENT_DELAY -gt 30 ]; then
+                        CURRENT_DELAY=30
+                      fi
+                      
+                      ATTEMPT=$((ATTEMPT + 1))
+                    done
+                    
+                    echo ""
+                    echo "✅ [SIMULATED] Verified in registry (after ${DELAY}s, attempt $ATTEMPT)"
+                    echo "🔗 [SIMULATED] Lineage maintained: Registry model points to workspace model"
+                    echo ""
+                    echo "✅ [SIMULATED] Model promotion complete!"
+                  displayName: 'Simulate Model Promotion'

@@ -18,6 +18,8 @@ import argparse
 import json
 import subprocess
 import sys
+import time
+from pathlib import Path
 
 
 def promote_to_registry(
@@ -78,43 +80,71 @@ def promote_to_registry(
             })
             continue
         
-        # Build model URI from workspace
-        model_uri = f"azureml://subscriptions/{subscription_id}/resourceGroups/{resource_group}/workspaces/{workspace_name}/models/{model_name}/versions/{model_version}"
+        print(f"   Sharing model to registry (preserving lineage)...")
         
-        # Promote to registry using model URI
-        promote_cmd = [
-            'az', 'ml', 'model', 'create',
+        # Share model to registry (preserves lineage)
+        share_cmd = [
+            'az', 'ml', 'model', 'share',
             '--name', model_name,
             '--version', model_version,
-            '--path', model_uri,  # Reference from workspace
+            '--workspace-name', workspace_name,
+            '--resource-group', resource_group,
             '--registry-name', registry_name,
-            '--resource-group', registry_resource_group,
-            '--set', f'tags.plant_id={plant_id}',
-            '--set', f'tags.circuit_id={circuit_id}',
-            '--set', f'tags.cutoff_date={cutoff_date}',
-            '--set', f'tags.training_hash={training_hash}',
-            '--set', 'tags.promoted_from=dev',
-            '-o', 'json'
+            '--share-with-name', model_name,
+            '--share-with-version', model_version
         ]
         
-        result = subprocess.run(promote_cmd, capture_output=True, text=True)
+        result = subprocess.run(share_cmd, capture_output=True, text=True)
         
         if result.returncode == 0:
-            print(f"   ✅ Promoted successfully")
+            print(f"   ✅ Shared successfully (lineage preserved)")
             
-            # Verify model in registry
-            verify_result = subprocess.run(check_cmd, capture_output=True)
-            if verify_result.returncode == 0:
-                print(f"   ✅ Verified in registry")
-            else:
-                print(f"   ⚠️  Promoted but verification failed")
+            # Wait for model to appear in registry with exponential backoff
+            print(f"   ⏳ Waiting for model to be available in registry...")
             
-            promoted.append({
-                'model_name': model_name,
-                'version': model_version,
-                'training_hash': training_hash,
-                'status': 'promoted'
-            })
+            # Configurable timeouts (can be passed as parameters)
+            max_wait_seconds = 120  # 2 minutes
+            initial_delay = 2  # Start with 2 seconds
+            max_delay = 30  # Cap at 30 seconds
+            
+            elapsed = 0
+            current_delay = initial_delay
+            attempt = 1
+            model_found = False
+            
+            while elapsed < max_wait_seconds:
+                verify_result = subprocess.run(check_cmd, capture_output=True)
+                if verify_result.returncode == 0:
+                    print(f"   ✅ Verified in registry (after {elapsed}s, attempt {attempt})")
+                    print(f"   🔗 Lineage maintained: Registry model points to workspace model")
+                    model_found = True
+                    
+                    promoted.append({
+                        'model_name': model_name,
+                        'version': model_version,
+                        'training_hash': training_hash,
+                        'status': 'shared',
+                        'propagation_time_seconds': elapsed
+                    })
+                    break
+                
+                print(f"   Attempt {attempt}: Not found yet, waiting {current_delay}s...")
+                time.sleep(current_delay)
+                elapsed += current_delay
+                
+                # Exponential backoff: double delay up to max
+                current_delay = min(current_delay * 2, max_delay)
+                attempt += 1
+            
+            if not model_found:
+                print(f"   ⚠️  Model shared but not visible in registry after {max_wait_seconds}s")
+                print(f"   ⚠️  This may be a propagation delay - check registry manually")
+                failed.append({
+                    'model_name': model_name,
+                    'version': model_version,
+                    'error': f'Not visible in registry after {max_wait_seconds}s',
+                    'status': 'timeout'
+                })
         else:
             print(f"   ❌ Failed: {result.stderr}")
             failed.append({

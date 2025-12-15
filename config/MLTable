@@ -10,6 +10,12 @@ transformations:
   - read_parquet:
       include_path_column: false
   
+  # Filter by plant and circuit
+  - filter: "plant_id == 'PLANT001'"
+  
+  - filter: "circuit_id == 'CIRCUIT01'"
+  
+  # Filter by date cutoff
   - filter: "date >= '2025-01-01'"
   
   - keep_columns:

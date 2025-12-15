@@ -30,9 +30,21 @@ parameters:
     displayName: 'Manual Circuit Specification (Optional)'
     type: string
     default: ''
-# Format: plant1_circuit1,plant2_circuit2
-# Example: flottec_2110,flottec_2130
-# Leave empty to use automatic change detection
+  # Format: plant1_circuit1,plant2_circuit2
+  # Example: flottec_2110,flottec_2130
+  # Leave empty to use automatic change detection
+  
+  - name: deploymentMode
+    displayName: 'Deployment Mode'
+    type: string
+    default: 'auto'
+    values:
+      - auto          # Full pipeline: Train → Promote → Deploy based on branch
+      - trainOnly     # Only train and register models (skip promotion/deployment)
+      - deployTest    # Only deploy to Test from Registry (no training)
+      - deployProd    # Only deploy to Prod from Registry (no training)
+  # Use 'auto' for normal CI/CD flow
+  # Use 'deployTest' or 'deployProd' for independent deployment runs
 
 variables:
   - name: pythonVersion
@@ -166,7 +178,7 @@ stages:
                 EOF
               displayName: 'Validate environment.yaml'
           
-          # Validate component YAML files
+            # Validate component YAML files
             - script: |
                 echo "📦 Validating component files..."
               
@@ -176,26 +188,26 @@ stages:
                     echo "Checking: $comp_file"
                   
                     python3 << EOF
-                import yaml
-                import sys
-              
-                try:
-                    with open('$comp_file', 'r') as f:
-                        comp = yaml.safe_load(f)
+                    import yaml
+                    import sys
                   
-                    required = ['name', 'version', 'type']
-                    for field in required:
-                        if field not in comp:
-                            print(f"❌ Missing field: {field}")
-                            sys.exit(1)
+                    try:
+                        with open('$comp_file', 'r') as f:
+                            comp = yaml.safe_load(f)
+                      
+                        required = ['name', 'version', 'type']
+                        for field in required:
+                            if field not in comp:
+                                print(f"❌ Missing field: {field}")
+                                sys.exit(1)
+                      
+                        print(f"✅ Valid: {comp['name']}:{comp['version']}")
                   
-                    print(f"✅ Valid: {comp['name']}:{comp['version']}")
-              
-                except Exception as e:
-                    print(f"❌ Error: {e}")
-                    sys.exit(1)
-                EOF
-                  
+                    except Exception as e:
+                        print(f"❌ Error: {e}")
+                        sys.exit(1)
+                    EOF
+                      
                     if [ $? -ne 0 ]; then
                       FAILED=1
                     fi
@@ -363,6 +375,17 @@ stages:
           
           # Check ML asset versions against Dev workspace
             - task: AzureCLI@2
+              displayName: 'Install Azure ML CLI Extension'
+              inputs:
+                azureSubscription: '$(azureServiceConnection)'
+                scriptType: 'bash'
+                scriptLocation: 'inlineScript'
+                inlineScript: |
+                  echo "📦 Installing Azure ML CLI extension (stable version only)..."
+                  az extension add --name ml --yes --only-show-errors --allow-preview false
+                  az extension list --query "[?name=='ml'].version" -o tsv
+          
+            - task: AzureCLI@2
               displayName: 'Check ML Asset Versions'
               inputs:
                 azureSubscription: '$(azureServiceConnection)'
@@ -527,7 +550,12 @@ stages:
   # ============================================
     - stage: RegisterInfrastructure
       displayName: '[DEV] Register Infrastructure'
-      condition: and(eq(variables['Build.SourceBranch'], 'refs/heads/develop'), ne(variables['Build.Reason'], 'PullRequest'))
+      condition: |
+        and(
+          eq(variables['Build.SourceBranch'], 'refs/heads/develop'),
+          ne(variables['Build.Reason'], 'PullRequest'),
+          in('${{ parameters.deploymentMode }}', 'auto', 'trainOnly')
+        )
       jobs:
         - job: RegisterEnvAndComponents
           displayName: 'Register Environment and Components'
@@ -543,6 +571,29 @@ stages:
             
             - script: pip install pyyaml
               displayName: 'Install dependencies'
+            
+            - task: AzureCLI@2
+              displayName: 'Install Azure ML CLI Extension'
+              inputs:
+                azureSubscription: '$(azureServiceConnection)'
+                scriptType: 'bash'
+                scriptLocation: 'inlineScript'
+                inlineScript: |
+                  echo "📦 Installing Azure ML CLI extension (stable version only)..."
+                  az extension add --name ml --yes --only-show-errors --allow-preview false
+                  az extension list --query "[?name=='ml'].version" -o tsv
+            
+            - task: AzureCLI@2
+              displayName: 'Configure Azure ML Defaults'
+              inputs:
+                azureSubscription: '$(azureServiceConnection)'
+                scriptType: 'bash'
+                scriptLocation: 'inlineScript'
+                inlineScript: |
+                  echo "⚙️ Configuring Azure ML defaults..."
+                  az configure --defaults group=$(resourceGroup) workspace=$(workspaceName)
+                  echo "Workspace: $(workspaceName)"
+                  echo "Resource Group: $(resourceGroup)"
             
             - task: AzureCLI@2
               displayName: 'Register Custom Environment'
@@ -561,18 +612,14 @@ stages:
                   # Check if this version already exists
                   EXISTING_ENV=$(az ml environment show \
                     --name "$ENV_NAME" \
-                    --version "$CONFIG_VERSION" \
-                    --workspace-name $(workspaceName) \
-                    --resource-group $(resourceGroup) 2>/dev/null || echo "not_found")
+                    --version "$CONFIG_VERSION" 2>/dev/null || echo "not_found")
                   
                   NEW_ENV_CREATED="false"
                   
                   if [[ "$EXISTING_ENV" == "not_found" ]]; then
                     echo "Version $CONFIG_VERSION not found. Registering new environment..."
                     az ml environment create \
-                      --file config/environment.yaml \
-                      --workspace-name $(workspaceName) \
-                      --resource-group $(resourceGroup)
+                      --file config/environment.yaml
                     echo "✅ Environment registered: $ENV_NAME:$CONFIG_VERSION"
                     NEW_ENV_CREATED="true"
                   else
@@ -624,17 +671,13 @@ stages:
                   # Check if this version already exists
                   EXISTING_COMP=$(az ml component show \
                     --name "$COMP_NAME" \
-                    --version "$COMP_VERSION" \
-                    --workspace-name $(workspaceName) \
-                    --resource-group $(resourceGroup) 2>/dev/null || echo "not_found")
+                    --version "$COMP_VERSION" 2>/dev/null || echo "not_found")
                   
                   if [[ "$EXISTING_COMP" == "not_found" ]]; then
                     echo "Version $COMP_VERSION not found. Registering..."
                     
                     if az ml component create \
-                      --file "$PIPELINE_COMP_FILE" \
-                      --workspace-name $(workspaceName) \
-                      --resource-group $(resourceGroup); then
+                      --file "$PIPELINE_COMP_FILE"; then
                       echo "✅ Registered pipeline component: $COMP_NAME:$COMP_VERSION"
                     else
                       echo "❌ Failed to register pipeline component: $COMP_NAME:$COMP_VERSION"
@@ -721,13 +764,24 @@ stages:
                     python3 scripts/detect_config_changes.py
                   fi
                   
-                  # Register MLTable for each changed circuit
+                  # Generate and upload MLTable files for each changed circuit
                   if [ -f "changed_circuits.json" ]; then
-                    echo "📊 Registering MLTables for changed circuits..."
+                    echo "📊 Generating and registering MLTables for changed circuits..."
+                    
+                    # Generate MLTable files
+                    python3 scripts/generate_mltable.py \
+                      --config config/circuits.yaml \
+                      --output-dir mltables \
+                      --adls-account $(adlsAccountName) \
+                      --container $(adlsContainer)
+                    
+                    # Upload MLTable files to blob storage and register
                     python3 << 'EOF'
                   import json
                   import subprocess
                   import sys
+                  import os
+                  from pathlib import Path
                   
                   with open('changed_circuits.json', 'r') as f:
                       changed = json.load(f)
@@ -750,45 +804,83 @@ stages:
                           continue
                       
                       data_name = f"{plant_id}_{circuit_id}"
-                      data_version = cutoff_date
                       
-                      print(f"\nChecking MLTable: {data_name}:{data_version}")
+                      # Calculate feature hash from feature list
+                      import hashlib
+                      features = circuit.get('features', [])
+                      if features:
+                          features_str = ','.join(sorted(features))
+                          feature_hash = hashlib.md5(features_str.encode()).hexdigest()[:8]
+                      else:
+                          feature_hash = 'default'
                       
-                      # Check if this version already exists
+                      print(f"\n📦 Processing MLTable: {data_name}")
+                      print(f"   Cutoff date: {cutoff_date}")
+                      print(f"   Feature hash: {feature_hash} ({len(features)} features)")
+                      
+                      # Check if a version with same cutoff_date and feature_hash already exists
+                      # Query by tags to find matching version
                       check_cmd = [
-                          'az', 'ml', 'data', 'show',
+                          'az', 'ml', 'data', 'list',
                           '--name', data_name,
-                          '--version', data_version,
                           '--workspace-name', '$(workspaceName)',
-                          '--resource-group', '$(resourceGroup)'
+                          '--resource-group', '$(resourceGroup)',
+                          '--query', f"[?tags.cutoff_date=='{cutoff_date}' && tags.feature_hash=='{feature_hash}'].{{version:version,cutoff_date:tags.cutoff_date,feature_hash:tags.feature_hash}}",
+                          '-o', 'json'
                       ]
                       
                       check_result = subprocess.run(check_cmd, capture_output=True, text=True)
                       
-                      if check_result.returncode == 0:
-                          print(f"✅ MLTable {data_name}:{data_version} already exists. Skipping.")
+                      if check_result.returncode == 0 and check_result.stdout.strip() not in ['[]', '']:
+                          existing = json.loads(check_result.stdout.strip())
+                          if existing:
+                              existing_version = existing[0]['version']
+                              print(f"✅ MLTable {data_name}:v{existing_version} already exists with same cutoff_date and features. Skipping.")
+                              continue
+                      
+                      # Check generated MLTable file exists locally
+                      mltable_local_dir = f"mltables/{plant_id}_{circuit_id}"
+                      
+                      if not os.path.exists(f"{mltable_local_dir}/MLTable"):
+                          print(f"❌ MLTable file not found: {mltable_local_dir}/MLTable")
+                          failed = True
                           continue
                       
-                      # Version doesn't exist, register it
-                      print(f"Registering MLTable: {data_name}:{data_version}")
+                      # Register MLTable data asset with tags
+                      # Azure ML will auto-increment version and upload the MLTable file
+                      print(f"📊 Registering new MLTable version with tags...")
+                      
+                      # Build tag arguments
+                      tag_args = [
+                          '--set', f'tags.cutoff_date={cutoff_date}',
+                          '--set', f'tags.feature_hash={feature_hash}',
+                          '--set', f'tags.plant_id={plant_id}',
+                          '--set', f'tags.circuit_id={circuit_id}'
+                      ]
+                      
+                      if features:
+                          tag_args.extend(['--set', f'tags.num_features={len(features)}'])
                       
                       create_cmd = [
                           'az', 'ml', 'data', 'create',
                           '--name', data_name,
-                          '--version', data_version,
                           '--type', 'mltable',
-                          '--path', f'azureml://datastores/workspaceblobstore/paths/mltable/{plant_id}_{circuit_id}/',
-                          '--workspace-name', '$(workspaceName)',
-                          '--resource-group', '$(resourceGroup)'
-                      ]
+                          '--path', mltable_local_dir,  # Local path - Azure ML uploads it
+                          '-o', 'json'
+                      ] + tag_args
                       
                       result = subprocess.run(create_cmd, capture_output=True, text=True)
                       if result.returncode != 0:
-                          print(f'❌ Failed to register {data_name}:{data_version}')
+                          print(f'❌ Failed to register {data_name}')
                           print(f'   Error: {result.stderr}')
                           failed = True
                       else:
-                          print(f'✅ Registered: {data_name}:{data_version}')
+                          # Parse version from output
+                          data_info = json.loads(result.stdout.strip())
+                          data_version = data_info.get('version', 'unknown')
+                          print(f'✅ Registered: {data_name}:v{data_version}')
+                          print(f'   Tags: cutoff_date={cutoff_date}, feature_hash={feature_hash}')
+                          print(f'   → Points to Delta table via MLTable definition')
                   
                   if failed:
                       print("\n❌ Some MLTable registrations failed")
@@ -812,7 +904,12 @@ stages:
     - stage: TrainModels
       displayName: '[DEV] Train Models'
       dependsOn: RegisterInfrastructure
-      condition: and(eq(variables['Build.SourceBranch'], 'refs/heads/develop'), ne(variables['Build.Reason'], 'PullRequest'))
+      condition: |
+        and(
+          eq(variables['Build.SourceBranch'], 'refs/heads/develop'),
+          ne(variables['Build.Reason'], 'PullRequest'),
+          in('${{ parameters.deploymentMode }}', 'auto', 'trainOnly')
+        )
       jobs:
         - job: ParallelTraining
           displayName: 'Train Models in Parallel'
@@ -825,6 +922,29 @@ stages:
               inputs:
                 artifact: 'changed_circuits'
                 path: $(Pipeline.Workspace)
+            
+            - task: AzureCLI@2
+              displayName: 'Install Azure ML CLI Extension'
+              inputs:
+                azureSubscription: '$(azureServiceConnection)'
+                scriptType: 'bash'
+                scriptLocation: 'inlineScript'
+                inlineScript: |
+                  echo "📦 Installing Azure ML CLI extension (stable version only)..."
+                  az extension add --name ml --yes --only-show-errors --allow-preview false
+                  az extension list --query "[?name=='ml'].version" -o tsv
+            
+            - task: AzureCLI@2
+              displayName: 'Configure Azure ML Defaults'
+              inputs:
+                azureSubscription: '$(azureServiceConnection)'
+                scriptType: 'bash'
+                scriptLocation: 'inlineScript'
+                inlineScript: |
+                  echo "⚙️ Configuring Azure ML defaults..."
+                  az configure --defaults group=$(resourceGroup) workspace=$(workspaceName)
+                  echo "Workspace: $(workspaceName)"
+                  echo "Resource Group: $(resourceGroup)"
             
             - task: AzureCLI@2
               displayName: 'Submit Training Jobs'
@@ -865,16 +985,51 @@ stages:
                       # Circuit config path (generated in Task 1.3)
                       circuit_config = f'config/circuits/{plant_id}_{circuit_id}.yaml'
                       
-                      # MLTable data asset reference (registered in Task 1.4)
+                      # Query for latest MLTable version with matching tags
                       data_name = f"{plant_id}_{circuit_id}"
-                      data_version = cutoff_date
+                      
+                      # Load features from circuit config to get feature_hash
+                      import yaml
+                      import hashlib
+                      with open(circuit_config, 'r') as cf:
+                          circuit_cfg = yaml.safe_load(cf)
+                      
+                      features = circuit_cfg.get('features', [])
+                      feature_str = ','.join(sorted(features))
+                      feature_hash = hashlib.md5(feature_str.encode()).hexdigest()[:8]
+                      
+                      # Query for data asset with matching tags
+                      query_cmd = [
+                          'az', 'ml', 'data', 'list',
+                          '--name', data_name,
+                          '--query', f"[?tags.cutoff_date=='{cutoff_date}' && tags.feature_hash=='{feature_hash}'] | [-1].version",
+                          '-o', 'tsv'
+                      ]
+                      
+                      query_result = subprocess.run(query_cmd, capture_output=True, text=True)
+                      
+                      if query_result.returncode != 0 or not query_result.stdout.strip():
+                          print(f"   ❌ ERROR: No MLTable found with cutoff_date={cutoff_date}, feature_hash={feature_hash}")
+                          failed_submissions.append({
+                              'plant_id': plant_id,
+                              'circuit_id': circuit_id,
+                              'error': 'MLTable not found with matching tags'
+                          })
+                          continue
+                      
+                      data_version = query_result.stdout.strip()
                       mltable_uri = f"azureml:{data_name}:{data_version}"
                       
-                      # Job name with timestamp
-                      job_name = f"{plant_id}_{circuit_id}_{cutoff_date}".replace('-', '_').replace(':', '_')
+                      print(f"   Found MLTable: {data_name}:v{data_version}")
+                      print(f"   Tags: cutoff_date={cutoff_date}, feature_hash={feature_hash}")
+                      
+                      # Job name with cutoff date and data version
+                      timestamp = cutoff_date.replace('-', '_').replace(':', '_')
+                      job_name = f"{plant_id}_{circuit_id}_{timestamp}_v{data_version}"
                       
                       print(f"   Config: {circuit_config}")
                       print(f"   Data: {mltable_uri}")
+                      print(f"   Job: {job_name}")
                       
                       # Submit training job using the pipeline job file
                       cmd = [
@@ -883,8 +1038,6 @@ stages:
                           '--name', job_name,
                           '--set', f'inputs.circuit_config.path={circuit_config}',
                           '--set', f'inputs.training_data.path={mltable_uri}',
-                          '--workspace-name', '$(workspaceName)',
-                          '--resource-group', '$(resourceGroup)',
                           '--query', 'name',
                           '-o', 'tsv'
                       ]
@@ -1453,6 +1606,29 @@ stages:
                     displayName: 'Show Failed Circuits'
                   
                   - task: AzureCLI@2
+                    displayName: 'Install Azure ML CLI Extension'
+                    inputs:
+                      azureSubscription: '$(azureServiceConnection)'
+                      scriptType: 'bash'
+                      scriptLocation: 'inlineScript'
+                      inlineScript: |
+                        echo "📦 Installing Azure ML CLI extension (stable version only)..."
+                        az extension add --name ml --yes --only-show-errors --allow-preview false
+                        az extension list --query "[?name=='ml'].version" -o tsv
+                  
+                  - task: AzureCLI@2
+                    displayName: 'Configure Azure ML Defaults'
+                    inputs:
+                      azureSubscription: '$(azureServiceConnection)'
+                      scriptType: 'bash'
+                      scriptLocation: 'inlineScript'
+                      inlineScript: |
+                        echo "⚙️ Configuring Azure ML defaults..."
+                        az configure --defaults group=$(resourceGroup) workspace=$(workspaceName)
+                        echo "Workspace: $(workspaceName)"
+                        echo "Resource Group: $(resourceGroup)"
+                  
+                  - task: AzureCLI@2
                     displayName: 'Retry Failed Training Jobs'
                     inputs:
                       azureSubscription: '$(azureServiceConnection)'
@@ -1509,8 +1685,6 @@ stages:
                                   '--name', job_name,
                                   '--set', f'inputs.circuit_config.path={circuit_config}',
                                   '--set', f'inputs.training_data.path={mltable_uri}',
-                                  '--workspace-name', '$(workspaceName)',
-                                  '--resource-group', '$(resourceGroup)',
                                   '--query', 'name',
                                   '-o', 'tsv'
                               ]
@@ -1800,6 +1974,7 @@ stages:
         and(
           eq(variables['Build.SourceBranch'], 'refs/heads/develop'),
           ne(variables['Build.Reason'], 'PullRequest'),
+          eq('${{ parameters.deploymentMode }}', 'auto'),
           in(dependencies.TrainModels.result, 'Succeeded', 'SucceededWithIssues'),
           in(dependencies.RetryFailedTraining.result, 'Succeeded', 'Skipped')
         )
@@ -2039,7 +2214,15 @@ stages:
   
     - stage: VerifyRegistry
       displayName: '[TEST] Verify Registry Models'
-      condition: ne(variables['Build.Reason'], 'PullRequest')  # Skip on PRs
+      dependsOn: []  # Independent - can run standalone
+      condition: |
+        and(
+          ne(variables['Build.Reason'], 'PullRequest'),
+          or(
+            and(startsWith(variables['Build.SourceBranch'], 'refs/heads/release/'), eq('${{ parameters.deploymentMode }}', 'auto')),
+            eq('${{ parameters.deploymentMode }}', 'deployTest')
+          )
+        )
       jobs:
       - job: QueryRegistry
         displayName: 'Query Latest Models from Registry'
@@ -2159,7 +2342,15 @@ stages:
     - stage: DeployToTest
       displayName: '[TEST] Deploy to Test Endpoints (Approval Required)'
       dependsOn: VerifyRegistry
-      condition: ne(variables['Build.Reason'], 'PullRequest')  # Skip on PRs
+      condition: |
+        and(
+          ne(variables['Build.Reason'], 'PullRequest'),
+          in(dependencies.VerifyRegistry.result, 'Succeeded', 'SucceededWithIssues'),
+          or(
+            and(startsWith(variables['Build.SourceBranch'], 'refs/heads/release/'), eq('${{ parameters.deploymentMode }}', 'auto')),
+            eq('${{ parameters.deploymentMode }}', 'deployTest')
+          )
+        )
       jobs:
       - deployment: DeployTest
         displayName: 'QA Lead + ML Lead Approval'
@@ -2399,7 +2590,15 @@ stages:
 
     - stage: VerifyRegistryProd
       displayName: '[PROD] Verify Production-Ready Models'
-      condition: ne(variables['Build.Reason'], 'PullRequest')  # Skip on PRs
+      dependsOn: []  # Independent - can run standalone
+      condition: |
+        and(
+          ne(variables['Build.Reason'], 'PullRequest'),
+          or(
+            and(eq(variables['Build.SourceBranch'], 'refs/heads/main'), eq('${{ parameters.deploymentMode }}', 'auto')),
+            eq('${{ parameters.deploymentMode }}', 'deployProd')
+          )
+        )
       jobs:
       - job: QueryRegistryProd
         displayName: 'Query Production-Ready Models from Registry'
@@ -2518,7 +2717,15 @@ stages:
     - stage: DeployToProduction
       displayName: '[PROD] Deploy to Production (Approval Required)'
       dependsOn: VerifyRegistryProd
-      condition: ne(variables['Build.Reason'], 'PullRequest')  # Skip on PRs
+      condition: |
+        and(
+          ne(variables['Build.Reason'], 'PullRequest'),
+          in(dependencies.VerifyRegistryProd.result, 'Succeeded', 'SucceededWithIssues'),
+          or(
+            and(eq(variables['Build.SourceBranch'], 'refs/heads/main'), eq('${{ parameters.deploymentMode }}', 'auto')),
+            eq('${{ parameters.deploymentMode }}', 'deployProd')
+          )
+        )
       jobs:
       - deployment: DeployProd
         displayName: 'Senior ML Engineer + Platform Lead Approval'

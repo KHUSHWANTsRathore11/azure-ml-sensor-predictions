@@ -23,7 +23,11 @@ def register_mltable(
     data_asset_name: str,
     version: str,
     description: str,
-    path: str
+    path: str,
+    delta_version: int = None,
+    cutoff_date: str = None,
+    plant_id: str = None,
+    circuit_id: str = None
 ):
     """
     Register MLTable Data Asset in Azure ML.
@@ -36,6 +40,10 @@ def register_mltable(
         version: Version string (date format: YYYY-MM-DD)
         description: Description of the data asset
         path: Path to the MLTable definition
+        delta_version: Delta Lake version used for reproducibility
+        cutoff_date: Training cutoff date
+        plant_id: Plant identifier
+        circuit_id: Circuit identifier
     """
     # Initialize ML Client
     credential = DefaultAzureCredential()
@@ -46,13 +54,26 @@ def register_mltable(
         workspace_name=workspace_name
     )
     
+    # Prepare tags for tracking
+    tags = {}
+    if delta_version is not None:
+        tags['delta_version'] = str(delta_version)
+    if cutoff_date:
+        tags['cutoff_date'] = cutoff_date
+    if plant_id:
+        tags['plant_id'] = plant_id
+    if circuit_id:
+        tags['circuit_id'] = circuit_id
+    tags['registered_at'] = datetime.now().isoformat()
+    
     # Create Data Asset
     data_asset = Data(
         name=data_asset_name,
         version=version,
         description=description,
         type=AssetTypes.MLTABLE,
-        path=path
+        path=path,
+        tags=tags
     )
     
     # Register Data Asset
@@ -62,6 +83,10 @@ def register_mltable(
         print(f"   Name: {registered_asset.name}")
         print(f"   Version: {registered_asset.version}")
         print(f"   ID: {registered_asset.id}")
+        if delta_version is not None:
+            print(f"   Delta version: {delta_version}")
+        if cutoff_date:
+            print(f"   Cutoff date: {cutoff_date}")
         return registered_asset
     except Exception as e:
         print(f"❌ Failed to register data asset: {str(e)}")

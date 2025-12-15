@@ -1,0 +1,6 @@
+# Template: Generate Circuit Configuration Files
+# Usage: - template: templates/generate-circuit-configs.yml
+
+steps:
+  - script: python3 scripts/generate_circuit_configs.py
+    displayName: 'Generate Circuit Configs'

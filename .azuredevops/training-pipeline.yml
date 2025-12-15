@@ -1,0 +1,397 @@
+# Training Pipeline - Train Models in Dev Workspace (Restructured)
+# 
+# Purpose: Train models, register in Dev workspace, and optionally promote to Registry
+# Branch: develop
+# Trigger: Changes to config/circuits.yaml, components, or src packages
+#
+# Architecture: 7 granular stages for better control and error handling
+
+name: Training-$(Date:yyyyMMdd)-$(Rev:r)
+
+trigger:
+  branches:
+    include:
+      - develop
+  paths:
+    include:
+      - config/circuits.yaml
+      - config/environment.yaml
+      - components/**
+      - src/packages/**
+      - scripts/**
+
+pr: none  # PR validation handled by pr-validation-pipeline.yml
+
+parameters:
+  - name: manualCircuits
+    displayName: 'Manual Circuit Specification (Optional)'
+    type: string
+    default: ''
+  # Format: plant1_circuit1,plant2_circuit2
+  # Example: PLANT001_CIRCUIT01,PLANT001_CIRCUIT02
+  # Leave empty to use automatic change detection
+  
+  - name: skip Promotion
+    displayName: 'Skip Promotion to Registry'
+    type: boolean
+    default: false
+  # Set to true to only train and register, skip promotion
+
+variables:
+  - name: pythonVersion
+    value: '3.9'
+  
+  - name: longRunningJobNotificationIntervalHours
+    value: '4'
+  
+  - name: mlEngineersEmail
+    value: ''
+  
+  - group: mlops-dev-variables
+  - group: mlops-registry-variables
+
+stages:
+  # ============================================
+  # STAGE 1: REGISTER ENVIRONMENT
+  # ============================================
+  - stage: RegisterEnvironment
+    displayName: '1. Register Environment'
+    jobs:
+      - job: RegisterEnv
+        displayName: 'Register Custom Environment'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+            fetchDepth: 0
+          
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+          
+          - script: pip install pyyaml
+            displayName: 'Install dependencies'
+          
+          - template: templates/install-ml-extension.yml
+          - template: templates/configure-ml-defaults.yml
+          
+          - task: AzureCLI@2
+            displayName: 'Register Custom Environment'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "🐳 Checking environment in Dev workspace..."
+                
+                CONFIG_VERSION=$(grep "^version:" config/environment.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                ENV_NAME=$(grep "^name:" config/environment.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                echo "Environment: $ENV_NAME:$CONFIG_VERSION"
+                
+                EXISTING_ENV=$(az ml environment show \
+                  --name "$ENV_NAME" \
+                  --version "$CONFIG_VERSION" 2>/dev/null || echo "not_found")
+                
+                if [[ "$EXISTING_ENV" == "not_found" ]]; then
+                  echo "Version $CONFIG_VERSION not found. Registering new environment..."
+                  az ml environment create --file config/environment.yaml
+                  echo "✅ Environment registered: $ENV_NAME:$CONFIG_VERSION"
+                else
+                  echo "✅ Environment $ENV_NAME:$CONFIG_VERSION already exists. Skipping registration."
+                fi
+
+  # ============================================
+  # STAGE 2: REGISTER COMPONENTS
+  # ============================================
+  - stage: RegisterComponents
+    displayName: '2. Register Components'
+    dependsOn: RegisterEnvironment
+    jobs:
+      - job: RegisterPipelineComponent
+        displayName: 'Register Pipeline Component'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+          
+          - template: templates/install-ml-extension.yml
+          - template: templates/configure-ml-defaults.yml
+          
+          - task: AzureCLI@2
+            displayName: 'Register Pipeline Component'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "📦 Registering pipeline component..."
+                
+                PIPELINE_COMP_FILE="components/training-pipeline-component.yaml"
+                COMP_NAME=$(grep "^name:" "$PIPELINE_COMP_FILE" | awk '{print $2}' | tr -d '"' | tr -d "'")
+                COMP_VERSION=$(grep "^version:" "$PIPELINE_COMP_FILE" | awk '{print $2}' | tr -d '"' | tr -d "'")
+                
+                echo "Checking pipeline component: $COMP_NAME:$COMP_VERSION"
+                
+                EXISTING_COMP=$(az ml component show \
+                  --name "$COMP_NAME" \
+                  --version "$COMP_VERSION" 2>/dev/null || echo "not_found")
+                
+                if [[ "$EXISTING_COMP" == "not_found" ]]; then
+                  echo "Version $COMP_VERSION not found. Registering..."
+                  
+                  if az ml component create --file "$PIPELINE_COMP_FILE"; then
+                    echo "✅ Registered pipeline component: $COMP_NAME:$COMP_VERSION"
+                  else
+                    echo "❌ Failed to register pipeline component"
+                    exit 1
+                  fi
+                else
+                  echo "✅ Pipeline component $COMP_NAME:$COMP_VERSION already exists. Skipping."
+                fi
+
+  # ============================================
+  # STAGE 3: REGISTER MLTABLES
+  # ============================================
+  - stage: RegisterMLTables
+    displayName: '3. Register MLTables'
+    dependsOn: RegisterComponents
+    jobs:
+      - job: RegisterDataAssets
+        displayName: 'Detect Changed Circuits & Register MLTables'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+            fetchDepth: 0
+          
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+          
+          - script: pip install pyyaml
+            displayName: 'Install dependencies'
+          
+          - template: templates/generate-circuit-configs.yml
+          
+          - task: AzureCLI@2
+            displayName: 'Register MLTables'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                python scripts/pipeline/detect_changed_circuits.py \
+                  --config config/circuits.yaml \
+                  --output changed_circuits.json \
+                  --manual-circuits '${{ parameters.manualCircuits }}' \
+                  --workspace-name $(workspaceName) \
+                  --resource-group $(resourceGroup)
+          
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Changed Circuits List'
+            inputs:
+              targetPath: 'changed_circuits.json'
+              artifact: 'changed_circuits'
+
+  # ============================================
+  # STAGE 4: SUBMIT TRAINING
+  # ============================================
+  - stage: SubmitTraining
+    displayName: '4. Submit Training Jobs'
+    dependsOn: RegisterMLTables
+    jobs:
+      - job: SubmitJobs
+        displayName: 'Submit Training Jobs'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+          
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: 'changed_circuits'
+              path: $(Pipeline.Workspace)
+          
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+          
+          - script: pip install pyyaml
+            displayName: 'Install dependencies'
+          
+          - template: templates/install-ml-extension.yml
+          - template: templates/configure-ml-defaults.yml
+          
+          - task: AzureCLI@2
+            displayName: 'Submit Training Jobs'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                python scripts/pipeline/submit_training_jobs.py \
+                  --changed-circuits $(Pipeline.Workspace)/changed_circuits.json \
+                  --output training_jobs.json \
+                  --pipeline-file pipelines/single-circuit-training.yaml \
+                  --workspace-name $(workspaceName) \
+                  --resource-group $(resourceGroup)
+          
+          - task:PublishPipelineArtifact@1
+            displayName: 'Publish Training Jobs Info'
+            inputs:
+              targetPath: 'training_jobs.json'
+              artifact: 'training_jobs'
+
+  # ============================================
+  # STAGE 5: MONITOR TRAINING
+  # ============================================
+  - stage: MonitorTraining
+    displayName: '5. Monitor Training Jobs'
+    dependsOn: SubmitTraining
+    jobs:
+      - job: WaitForCompletion
+        displayName: 'Wait for Training Completion'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: 'training_jobs'
+              path: $(Pipeline.Workspace)
+          
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+          
+          - script: pip install azure-ai-ml azure-identity
+            displayName: 'Install Azure ML SDK'
+          
+          - task: AzureCLI@2
+            displayName: 'Monitor Training Jobs'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                python scripts/pipeline/monitor_training_jobs.py \
+                  --training-jobs $(Pipeline.Workspace)/training_jobs.json \
+                  --subscription-id $(subscriptionId) \
+                  --resource-group $(resourceGroup) \
+                  --workspace-name $(workspaceName) \
+                  --output monitoring_result.json
+          
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Monitoring Result'
+            inputs:
+              targetPath: 'monitoring_result.json'
+              artifact: 'monitoring_result'
+
+  # ============================================
+  # STAGE 6: REGISTER MODELS
+  # ============================================
+  - stage: RegisterModels
+    displayName: '6. Register Models'
+    dependsOn: MonitorTraining
+    jobs:
+      - job: RegisterTrainedModels
+        displayName: 'Register Trained Models in Dev Workspace'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+          
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: 'training_jobs'
+              path: $(Pipeline.Workspace)
+          
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+          
+          - script: pip install azure-ai-ml azure-identity pyyaml
+            displayName: 'Install dependencies'
+          
+          - task: AzureCLI@2
+            displayName: 'Register Models'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                python scripts/pipeline/register_models.py \
+                  --training-jobs $(Pipeline.Workspace)/training_jobs.json \
+                  --subscription-id $(subscriptionId) \
+                  --resource-group $(resourceGroup) \
+                  --workspace-name $(workspaceName) \
+                  --output registered_models.json
+          
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Registered Models'
+            inputs:
+              targetPath: 'registered_models.json'
+              artifact: 'registered_models'
+
+  # ============================================
+  # STAGE 7: PROMOTE TO REGISTRY
+  # ============================================
+  - stage: PromoteToRegistry
+    displayName: '7. Promote to Registry (Approval Required)'
+    dependsOn: RegisterModels
+    condition: and(succeeded(), ne('${{ parameters.skipPromotion }}', 'true'))
+    jobs:
+      - deployment: ApprovalGate
+        displayName: 'ML Engineer Approval'
+        environment: 'registry-promotion'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                
+                - task: DownloadPipelineArtifact@2
+                  inputs:
+                    artifact: 'registered_models'
+                    path: $(Pipeline.Workspace)
+                
+                - script: |
+                    echo "📋 Models ready for promotion to Registry:"
+                    python3 << 'EOF'
+                    import json
+                    with open('$(Pipeline.Workspace)/registered_models.json', 'r') as f:
+                        data = json.load(f)
+                    models = data.get('models', [])
+                    for model in models:
+                        print(f"  - {model['model_name']}:v{model['version']} (config_hash={model['config_hash']})")
+                    EOF
+                  displayName: 'Show Models for Promotion'
+                
+                - task: UsePythonVersion@0
+                  inputs:
+                    versionSpec: '$(pythonVersion)'
+                
+                - template: templates/install-ml-extension.yml
+                
+                - task: AzureCLI@2
+                  displayName: 'Promote Models to Registry'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      python scripts/pipeline/promote_to_registry.py \
+                        --registered-models $(Pipeline.Workspace)/registered_models.json \
+                        --subscription-id $(subscriptionId) \
+                        --resource-group $(resourceGroup) \
+                        --workspace-name $(workspaceName) \
+                        --registry-name $(registryName) \
+                        --registry-resource-group $(registryResourceGroup) \
+                        --output promotion_result.json
+                
+                - task: PublishPipelineArtifact@1
+                  displayName: 'Publish Promotion Result'
+                  inputs:
+                    targetPath: 'promotion_result.json'
+                    artifact: 'promotion_result'

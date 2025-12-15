@@ -15,6 +15,7 @@ circuits:
       - voltage
       - flow_rate
     cutoff_date: "2025-11-01"
+    delta_version: 1  # Delta Lake version to use for reproducibility (update this manually)
     training_days: 365
     forecast_horizon: 7
     hyperparameters:
@@ -36,6 +37,7 @@ circuits:
       - voltage
       - flow_rate
     cutoff_date: "2025-11-01"
+    delta_version: 1  # Delta Lake version to use for reproducibility (update this manually)
     training_days: 365
     forecast_horizon: 7
     hyperparameters:
@@ -57,6 +59,7 @@ circuits:
       - voltage
       - flow_rate
     cutoff_date: "2025-11-01"
+    delta_version: 1  # Delta Lake version to use for reproducibility (update this manually)
     training_days: 365
     forecast_horizon: 7
     hyperparameters:
@@ -79,6 +82,7 @@ circuits:
       - voltage
       - flow_rate
     cutoff_date: "2025-11-01"
+    delta_version: 1  # Delta Lake version to use for reproducibility (update this manually)
     training_days: 365
     forecast_horizon: 7
     hyperparameters:
@@ -100,6 +104,7 @@ circuits:
       - voltage
       - flow_rate
     cutoff_date: "2025-11-01"
+    delta_version: 1  # Delta Lake version to use for reproducibility (update this manually)
     training_days: 365
     forecast_horizon: 7
     hyperparameters:
@@ -117,6 +122,7 @@ circuits:
 #    description: "Circuit description"
 #    features: [temperature, pressure, vibration, current, voltage, flow_rate]
 #    cutoff_date: "2025-11-01"
+#    delta_version: 1  # Delta Lake version to use for reproducibility
 #    training_days: 365
 #    forecast_horizon: 7
 #    hyperparameters:

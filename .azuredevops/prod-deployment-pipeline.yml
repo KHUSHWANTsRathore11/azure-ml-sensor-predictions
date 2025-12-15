@@ -1,0 +1,374 @@
+# Production Deployment Pipeline - Deploy to Production
+# 
+# Purpose: Deploy production-ready models from Registry to Production workspace
+# Branch: main
+# Trigger: Manual or auto on main branch
+
+name: Prod-Deploy-$(Date:yyyyMMdd)-$(Rev:r)
+
+trigger:
+  branches:
+    include:
+      - main
+
+pr: none
+
+variables:
+  - name: pythonVersion
+    value: '3.9'
+  
+  - group: mlops-prod-variables
+  - group: mlops-registry-variables
+
+stages:
+  # ============================================
+  # VERIFY PRODUCTION-READY MODELS
+  # ============================================
+  - stage: VerifyRegistry
+    displayName: 'Verify Production-Ready Models'
+    jobs:
+      - job: QueryRegistry
+        displayName: 'Query Production-Ready Models'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+          
+          - template: templates/generate-circuit-configs.yml
+          
+          - template: templates/install-ml-extension.yml
+          
+          - task: AzureCLI@2
+            displayName: 'Query Registry for Production-Ready Models'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "🏛️ Querying Registry for production-ready models..."
+                
+                python3 << 'EOF'
+                import json
+                import subprocess
+                import sys
+                import yaml
+                from pathlib import Path
+                
+                config_dir = Path('config/circuits')
+                
+                if not config_dir.exists():
+                    print("❌ Circuit configs directory not found")
+                    sys.exit(1)
+                
+                config_files = sorted(config_dir.glob('*.yaml'))
+                
+                if not config_files:
+                    print("❌ No circuit config files found")
+                    sys.exit(1)
+                
+                print(f"📂 Found {len(config_files)} circuit config file(s)\n")
+                
+                models_info = []
+                not_found = []
+                
+                for config_file in config_files:
+                    with open(config_file, 'r') as f:
+                        circuit = yaml.safe_load(f)
+                    
+                    plant_id = circuit['plant_id']
+                    circuit_id = circuit['circuit_id']
+                    model_name = circuit.get('model_name', f'{plant_id.lower()}-{circuit_id.lower()}')
+                    config_hash = circuit.get('metadata', {}).get('config_hash', 'unknown')
+                    
+                    print(f"🔍 Checking: {model_name} (config_hash: {config_hash})")
+                    
+                    # Query for production-ready models with matching config_hash
+                    check_cmd = [
+                        'az', 'ml', 'model', 'list',
+                        '--name', model_name,
+                        '--registry-name', '$(registryName)',
+                        '--resource-group', '$(registryResourceGroup)',
+                        '--query', f"[?tags.config_hash=='{config_hash}' && tags.production_ready=='true'] | [0]",
+                        '-o', 'json'
+                    ]
+                    
+                    result = subprocess.run(check_cmd, capture_output=True, text=True)
+                    
+                    if result.returncode == 0 and result.stdout.strip() and result.stdout.strip() != 'null':
+                        model = json.loads(result.stdout)
+                        models_info.append({
+                            'plant_id': plant_id,
+                            'circuit_id': circuit_id,
+                            'model_name': model_name,
+                            'version': str(model['version']),
+                            'config_hash': config_hash,
+                            'tags': model.get('tags', {})
+                        })
+                        print(f"   ✅ Found: {model_name}:v{model['version']} (production_ready=true)")
+                    else:
+                        not_found.append(f"{model_name} (config_hash={config_hash})")
+                        print(f"   ⚠️  Not found or not production-ready")
+                
+                if not_found:
+                    print(f"\n⚠️  {len(not_found)} model(s) not production-ready:")
+                    for model in not_found:
+                        print(f"   - {model}")
+                    print("\nℹ️  Models must pass QA sign-off before production deployment\n")
+                
+                if not models_info:
+                    print("\n❌ No production-ready models found in Registry")
+                    sys.exit(1)
+                
+                with open('registry_models.json', 'w') as f:
+                    json.dump({'models': models_info}, f, indent=2)
+                
+                print(f"\n✅ Verified {len(models_info)} production-ready model(s)")
+                EOF
+          
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: 'registry_models.json'
+              artifact: 'registry_models'
+
+  # ============================================
+  # DEPLOY TO PRODUCTION
+  # ============================================
+  - stage: DeployToProduction
+    displayName: 'Deploy to Production (Approval Required)'
+    dependsOn: VerifyRegistry
+    jobs:
+      - deployment: DeployProd
+        displayName: 'Senior ML Engineer + Platform Lead Approval'
+        environment: 'production-deployment'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                
+                - task: DownloadPipelineArtifact@2
+                  inputs:
+                    artifact: 'registry_models'
+                    path: $(Pipeline.Workspace)
+                
+                - script: |
+                    echo "📋 Production-ready models to deploy:"
+                    python3 << 'EOF'
+                    import json
+                    with open('$(Pipeline.Workspace)/registry_models.json', 'r') as f:
+                        data = json.load(f)
+                    for model in data['models']:
+                        print(f"  - {model['model_name']}:v{model['version']} (config_hash={model['config_hash']})")
+                    EOF
+                    echo ""
+                    echo "⚠️  PRODUCTION DEPLOYMENT - Requires dual approval"
+                  displayName: 'Show Deployment Plan'
+                
+                - template: templates/install-ml-extension.yml
+                
+                - task: AzureCLI@2
+                  displayName: 'Deploy Batch Endpoints to Production'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "🚀 Deploying batch endpoints to Production workspace..."
+                      
+                      python3 << 'EOF'
+                      import json
+                      import subprocess
+                      import sys
+                      import time
+                      
+                      with open('$(Pipeline.Workspace)/registry_models.json', 'r') as f:
+                          data = json.load(f)
+                      
+                      models = data['models']
+                      deployed = []
+                      failed = []
+                      
+                      for model in models:
+                          plant_id = model['plant_id']
+                          circuit_id = model['circuit_id']
+                          model_name = model['model_name']
+                          version = model['version']
+                          
+                          endpoint_name = f"{plant_id.lower()}-{circuit_id.lower()}-prod".replace('_', '-')
+                          deployment_name = f"v{version}".replace('.', '-')
+                          
+                          print(f"\n{'='*60}")
+                          print(f"🚨 PRODUCTION DEPLOYMENT")
+                          print(f"Endpoint: {endpoint_name}")
+                          print(f"Model: {model_name}:v{version} (from Registry)")
+                          print(f"{'='*60}")
+                          
+                          # Check if endpoint exists
+                          check = subprocess.run([
+                              'az', 'ml', 'batch-endpoint', 'show',
+                              '--name', endpoint_name,
+                              '--workspace-name', '$(workspaceName)',
+                              '--resource-group', '$(resourceGroup)'
+                          ], capture_output=True)
+                          
+                          if check.returncode != 0:
+                              print("Creating new production endpoint...")
+                              create = subprocess.run([
+                                  'az', 'ml', 'batch-endpoint', 'create',
+                                  '--name', endpoint_name,
+                                  '--workspace-name', '$(workspaceName)',
+                                  '--resource-group', '$(resourceGroup)',
+                                  '--tags', 'environment=production', 'criticality=high'
+                              ], capture_output=True, text=True)
+                              
+                              if create.returncode != 0:
+                                  print(f"❌ Failed: {create.stderr}")
+                                  failed.append(endpoint_name)
+                                  continue
+                              print("✅ Production endpoint created")
+                          else:
+                              print("✅ Production endpoint exists")
+                          
+                          # Create deployment with production settings
+                          print(f"Creating production deployment: {deployment_name}...")
+                          model_path = f"azureml://registries/$(registryName)/models/{model_name}/versions/{version}"
+                          
+                          deploy = subprocess.run([
+                              'az', 'ml', 'batch-deployment', 'create',
+                              '--name', deployment_name,
+                              '--endpoint-name', endpoint_name,
+                              '--model', model_path,
+                              '--compute', '$(prodScoringCluster)',
+                              '--instance-count', '2',  # Higher instance count for production
+                              '--max-concurrency-per-instance', '4',  # Higher concurrency
+                              '--mini-batch-size', '20',  # Larger batch size
+                              '--output-action', 'append_row',
+                              '--output-file-name', 'predictions.csv',
+                              '--workspace-name', '$(workspaceName)',
+                              '--resource-group', '$(resourceGroup)'
+                          ], capture_output=True, text=True)
+                          
+                          if deploy.returncode != 0:
+                              print(f"❌ Failed: {deploy.stderr}")
+                              failed.append(endpoint_name)
+                              continue
+                          
+                          # Set as default deployment
+                          subprocess.run([
+                              'az', 'ml', 'batch-endpoint', 'update',
+                              '--name', endpoint_name,
+                              '--set', f'defaults.deployment_name={deployment_name}',
+                              '--workspace-name', '$(workspaceName)',
+                              '--resource-group', '$(resourceGroup)'
+                          ], capture_output=True)
+                          
+                          deployed.append(endpoint_name)
+                          print(f"✅ Production deployment successful")
+                          
+                          # Brief pause between production deployments
+                          time.sleep(5)
+                      
+                      print(f"\n{'='*60}")
+                      print(f"Production Deployment Summary:")
+                      print(f"  ✅ Deployed: {len(deployed)}")
+                      print(f"  ❌ Failed: {len(failed)}")
+                      print(f"{'='*60}\n")
+                      
+                      if failed:
+                          print("❌ Some production deployments failed")
+                          sys.exit(1)
+                      
+                      print("✅ All production endpoints deployed successfully")
+                      EOF
+
+  # ============================================
+  # PRODUCTION VALIDATION
+  # ============================================
+  - stage: ProductionValidation
+    displayName: 'Production Validation'
+    dependsOn: DeployToProduction
+    jobs:
+      - job: ValidateProduction
+        displayName: 'Validate Production Endpoints'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+          
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: 'registry_models'
+              path: $(Pipeline.Workspace)
+          
+          - template: templates/install-ml-extension.yml
+          
+          - task: AzureCLI@2
+            displayName: 'Validate Endpoint Health'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "🔍 Validating production endpoint health..."
+                
+                python3 << 'EOF'
+                import json
+                import subprocess
+                
+                with open('$(Pipeline.Workspace)/registry_models.json', 'r') as f:
+                    data = json.load(f)
+                
+                models = data['models']
+                healthy = []
+                unhealthy = []
+                
+                for model in models:
+                    plant_id = model['plant_id']
+                    circuit_id = model['circuit_id']
+                    
+                    endpoint_name = f"{plant_id.lower()}-{circuit_id.lower()}-prod".replace('_', '-')
+                    
+                    print(f"\n🔍 Checking: {endpoint_name}")
+                    
+                    # Check endpoint status
+                    check = subprocess.run([
+                        'az', 'ml', 'batch-endpoint', 'show',
+                        '--name', endpoint_name,
+                        '--workspace-name', '$(workspaceName)',
+                        '--resource-group', '$(resourceGroup)',
+                        '--query', 'provisioning_state',
+                        '-o', 'tsv'
+                    ], capture_output=True, text=True)
+                    
+                    if check.returncode == 0 and check.stdout.strip() == 'Succeeded':
+                        print(f"   ✅ Endpoint healthy")
+                        healthy.append(endpoint_name)
+                    else:
+                        print(f"   ❌ Endpoint unhealthy")
+                        unhealthy.append(endpoint_name)
+                
+                print(f"\n{'='*60}")
+                print(f"Health Check Summary:")
+                print(f"  ✅ Healthy: {len(healthy)}")
+                print(f"  ❌ Unhealthy: {len(unhealthy)}")
+                print(f"{'='*60}\n")
+                
+                if unhealthy:
+                    print("⚠️  Some endpoints are unhealthy - review required")
+                    for ep in unhealthy:
+                        print(f"   - {ep}")
+                else:
+                    print("✅ All production endpoints are healthy")
+                EOF
+          
+          - script: |
+              echo "📊 Production Deployment Complete"
+              echo ""
+              echo "Next Steps:"
+              echo "  1. Monitor endpoints in Azure ML Studio"
+              echo "  2. Set up alerts for endpoint failures"
+              echo "  3. Schedule regular batch inference jobs"
+              echo "  4. Review prediction outputs"
+            displayName: 'Post-Deployment Summary'

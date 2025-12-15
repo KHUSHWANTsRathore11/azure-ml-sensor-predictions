@@ -1,0 +1,15 @@
+# Template: Configure Azure ML Defaults
+# Usage: - template: templates/configure-ml-defaults.yml
+
+steps:
+  - task: AzureCLI@2
+    displayName: 'Configure Azure ML Defaults'
+    inputs:
+      azureSubscription: '$(azureServiceConnection)'
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        echo "⚙️ Configuring Azure ML defaults..."
+        az configure --defaults group=$(resourceGroup) workspace=$(workspaceName)
+        echo "Workspace: $(workspaceName)"
+        echo "Resource Group: $(resourceGroup)"

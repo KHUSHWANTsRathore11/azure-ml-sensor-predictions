@@ -1,0 +1,14 @@
+# Template: Install Azure ML CLI Extension (Stable Version)
+# Usage: - template: templates/install-ml-extension.yml
+
+steps:
+  - task: AzureCLI@2
+    displayName: 'Install Azure ML CLI Extension'
+    inputs:
+      azureSubscription: '$(azureServiceConnection)'
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        echo "📦 Installing Azure ML CLI extension (stable version only)..."
+        az extension add --name ml --yes --only-show-errors --allow-preview false
+        az extension list --query "[?name=='ml'].version" -o tsv

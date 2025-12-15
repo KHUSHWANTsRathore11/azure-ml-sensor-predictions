@@ -1,0 +1,854 @@
+# Training Pipeline - Train Models in Dev Workspace
+# 
+# Purpose: Train models, register in Dev workspace, and optionally promote to Registry
+# Branch: develop
+# Trigger: Changes to config/circuits.yaml, components, or src packages
+
+name: Training-$(Date:yyyyMMdd)-$(Rev:r)
+
+trigger:
+  branches:
+    include:
+      - develop
+  paths:
+    include:
+      - config/circuits.yaml
+      - config/environment.yaml
+      - components/**
+      - src/packages/**
+      - scripts/**
+
+pr: none  # PR validation handled by pr-validation-pipeline.yml
+
+parameters:
+  - name: manualCircuits
+    displayName: 'Manual Circuit Specification (Optional)'
+    type: string
+    default: ''
+  # Format: plant1_circuit1,plant2_circuit2
+  # Example: flottec_2110,flottec_2130
+  # Leave empty to use automatic change detection
+  
+  - name: skipPromotion
+    displayName: 'Skip Promotion to Registry'
+    type: boolean
+    default: false
+  # Set to true to only train and register, skip promotion
+
+variables:
+  - name: pythonVersion
+    value: '3.9'
+  
+  - name: longRunningJobNotificationIntervalHours
+    value: '4'
+  
+  - name: mlEngineersEmail
+    value: ''
+  
+  - group: mlops-dev-variables
+  - group: mlops-registry-variables
+
+stages:
+  # ============================================
+  # REGISTER INFRASTRUCTURE
+  # ============================================
+  - stage: RegisterInfrastructure
+    displayName: 'Register Infrastructure'
+    jobs:
+      - job: RegisterEnvAndComponents
+        displayName: 'Register Environment and Components'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+            fetchDepth: 0
+          
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+          
+          - script: pip install pyyaml
+            displayName: 'Install dependencies'
+          
+          - template: templates/install-ml-extension.yml
+          - template: templates/configure-ml-defaults.yml
+          
+          - task: AzureCLI@2
+            displayName: 'Register Custom Environment'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "🐳 Checking environment in Dev workspace..."
+                
+                CONFIG_VERSION=$(grep "^version:" config/environment.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                ENV_NAME=$(grep "^name:" config/environment.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                echo "Environment: $ENV_NAME:$CONFIG_VERSION"
+                
+                EXISTING_ENV=$(az ml environment show \
+                  --name "$ENV_NAME" \
+                  --version "$CONFIG_VERSION" 2>/dev/null || echo "not_found")
+                
+                NEW_ENV_CREATED="false"
+                
+                if [[ "$EXISTING_ENV" == "not_found" ]]; then
+                  echo "Version $CONFIG_VERSION not found. Registering new environment..."
+                  az ml environment create --file config/environment.yaml
+                  echo "✅ Environment registered: $ENV_NAME:$CONFIG_VERSION"
+                  NEW_ENV_CREATED="true"
+                else
+                  echo "✅ Environment $ENV_NAME:$CONFIG_VERSION already exists. Skipping registration."
+                fi
+                
+                # Save environment info
+                if [ "$NEW_ENV_CREATED" = "true" ]; then
+                  JSON_BOOL="true"
+                else
+                  JSON_BOOL="false"
+                fi
+                
+                cat > environment_info.json << ENVEOF
+                {
+                  "name": "$ENV_NAME",
+                  "version": "$CONFIG_VERSION",
+                  "newly_created": $JSON_BOOL
+                }
+                ENVEOF
+                
+                echo ""
+                echo "📝 Environment info saved"
+                cat environment_info.json
+          
+          - task: AzureCLI@2
+            displayName: 'Register Pipeline Component'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "📦 Registering pipeline component..."
+                
+                PIPELINE_COMP_FILE="components/training-pipeline-component.yaml"
+                COMP_NAME=$(grep "^name:" "$PIPELINE_COMP_FILE" | awk '{print $2}' | tr -d '"' | tr -d "'")
+                COMP_VERSION=$(grep "^version:" "$PIPELINE_COMP_FILE" | awk '{print $2}' | tr -d '"' | tr -d "'")
+                
+                echo "Checking pipeline component: $COMP_NAME:$COMP_VERSION"
+                
+                EXISTING_COMP=$(az ml component show \
+                  --name "$COMP_NAME" \
+                  --version "$COMP_VERSION" 2>/dev/null || echo "not_found")
+                
+                if [[ "$EXISTING_COMP" == "not_found" ]]; then
+                  echo "Version $COMP_VERSION not found. Registering..."
+                  
+                  if az ml component create --file "$PIPELINE_COMP_FILE"; then
+                    echo "✅ Registered pipeline component: $COMP_NAME:$COMP_VERSION"
+                  else
+                    echo "❌ Failed to register pipeline component"
+                    exit 1
+                  fi
+                else
+                  echo "✅ Pipeline component $COMP_NAME:$COMP_VERSION already exists. Skipping."
+                fi
+                
+                echo "##vso[task.setvariable variable=pipelineCompVersion;isOutput=true]$COMP_VERSION"
+            name: registerPipelineComp
+          
+          - template: templates/generate-circuit-configs.yml
+          
+          - task: AzureCLI@2
+            displayName: 'Detect Changed Circuits & Register MLTables'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "🔍 Detecting changed circuits..."
+                
+                python3 << 'EOF'
+                import json
+                import subprocess
+                import sys
+                import os
+                import hashlib
+                import yaml
+                
+                # Read circuits config
+                with open('config/circuits.yaml', 'r') as f:
+                    config = yaml.safe_load(f)
+                
+                circuits = config.get('circuits', [])
+                
+                # Check for manual circuit specification
+                manual_circuits = os.getenv('MANUALCIRCUITS', '${{ parameters.manualCircuits }}').strip()
+                
+                if manual_circuits:
+                    print(f"📋 Manual circuit specification: {manual_circuits}")
+                    manual_list = [c.strip() for c in manual_circuits.split(',')]
+                    circuits = [c for c in circuits if f"{c['plant_id']}_{c['circuit_id']}" in manual_list]
+                    print(f"   Selected {len(circuits)} circuit(s)")
+                else:
+                    # TODO: Implement change detection logic based on git diff
+                    print("📋 Using all circuits from config")
+                
+                if not circuits:
+                    print("ℹ️  No circuits to process")
+                    with open('changed_circuits.json', 'w') as f:
+                        json.dump({'circuits': []}, f)
+                    sys.exit(0)
+                
+                print(f"\n📊 Processing {len(circuits)} circuit(s)...")
+                
+                changed_circuits = []
+                failed = False
+                
+                for circuit in circuits:
+                    plant_id = circuit['plant_id']
+                    circuit_id = circuit['circuit_id']
+                    cutoff_date = circuit.get('cutoff_date', '')
+                    
+                    print(f"\n{'='*60}")
+                    print(f"Circuit: {plant_id}_{circuit_id}")
+                    print(f"Cutoff Date: {cutoff_date}")
+                    
+                    # Load circuit-specific config for features
+                    circuit_config_path = f'config/circuits/{plant_id}_{circuit_id}.yaml'
+                    if not os.path.exists(circuit_config_path):
+                        print(f"❌ Circuit config not found: {circuit_config_path}")
+                        failed = True
+                        continue
+                    
+                    with open(circuit_config_path, 'r') as cf:
+                        circuit_cfg = yaml.safe_load(cf)
+                    
+                    features = circuit_cfg.get('features', [])
+                    feature_str = ','.join(sorted(features))
+                    feature_hash = hashlib.md5(feature_str.encode()).hexdigest()[:8]
+                    
+                    print(f"Feature hash: {feature_hash} ({len(features)} features)")
+                    
+                    data_name = f"{plant_id}_{circuit_id}"
+                    
+                    # Check if MLTable with same tags already exists
+                    check_cmd = [
+                        'az', 'ml', 'data', 'list',
+                        '--name', data_name,
+                        '--query', f"[?tags.cutoff_date=='{cutoff_date}' && tags.feature_hash=='{feature_hash}'].{{version:version,cutoff_date:tags.cutoff_date,feature_hash:tags.feature_hash}}",
+                        '-o', 'json'
+                    ]
+                    
+                    check_result = subprocess.run(check_cmd, capture_output=True, text=True)
+                    
+                    if check_result.returncode == 0 and check_result.stdout.strip() not in ['[]', '']:
+                        existing = json.loads(check_result.stdout.strip())
+                        if existing:
+                            existing_version = existing[0]['version']
+                            print(f"✅ MLTable {data_name}:v{existing_version} already exists with same cutoff_date and features. Skipping.")
+                            continue
+                    
+                    # Check generated MLTable file exists locally
+                    mltable_local_dir = f"mltables/{plant_id}_{circuit_id}"
+                    
+                    if not os.path.exists(f"{mltable_local_dir}/MLTable"):
+                        print(f"❌ MLTable file not found: {mltable_local_dir}/MLTable")
+                        failed = True
+                        continue
+                    
+                    # Register MLTable data asset with tags
+                    print(f"📊 Registering new MLTable version with tags...")
+                    
+                    tag_args = [
+                        '--set', f'tags.cutoff_date={cutoff_date}',
+                        '--set', f'tags.feature_hash={feature_hash}',
+                        '--set', f'tags.plant_id={plant_id}',
+                        '--set', f'tags.circuit_id={circuit_id}'
+                    ]
+                    
+                    if features:
+                        tag_args.extend(['--set', f'tags.num_features={len(features)}'])
+                    
+                    create_cmd = [
+                        'az', 'ml', 'data', 'create',
+                        '--name', data_name,
+                        '--type', 'mltable',
+                        '--path', mltable_local_dir,
+                        '-o', 'json'
+                    ] + tag_args
+                    
+                    result = subprocess.run(create_cmd, capture_output=True, text=True)
+                    if result.returncode != 0:
+                        print(f'❌ Failed to register {data_name}')
+                        print(f'   Error: {result.stderr}')
+                        failed = True
+                        continue
+                    
+                    # Parse version from response
+                    data_info = json.loads(result.stdout)
+                    data_version = data_info.get('version', 'unknown')
+                    
+                    print(f'✅ Registered: {data_name}:v{data_version}')
+                    print(f'   Tags: cutoff_date={cutoff_date}, feature_hash={feature_hash}, num_features={len(features)}')
+                    
+                    changed_circuits.append(circuit)
+                
+                # Save to file
+                with open('changed_circuits.json', 'w') as f:
+                    json.dump({'circuits': changed_circuits}, f, indent=2)
+                
+                print(f"\n{'='*60}")
+                print(f"Summary:")
+                print(f"  📊 Processed: {len(circuits)}")
+                print(f"  ✅ Registered/Reused: {len(changed_circuits)}")
+                print(f"{'='*60}\n")
+                
+                if failed:
+                    print("❌ Some MLTable registrations failed")
+                    sys.exit(1)
+                
+                if changed_circuits:
+                    print("✅ MLTable registration complete")
+                else:
+                    print("ℹ️  No new MLTables to register")
+                EOF
+          
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Changed Circuits List'
+            inputs:
+              targetPath: 'changed_circuits.json'
+              artifact: 'changed_circuits'
+
+  # ============================================
+  # TRAIN MODELS
+  # ============================================
+  - stage: TrainModels
+    displayName: 'Train Models'
+    dependsOn: RegisterInfrastructure
+    condition: succeeded()
+    jobs:
+      - job: SubmitTrainingJobs
+        displayName: 'Submit Training Jobs'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+          
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: 'changed_circuits'
+              path: $(Pipeline.Workspace)
+          
+          - template: templates/install-ml-extension.yml
+          - template: templates/configure-ml-defaults.yml
+          
+          - task: AzureCLI@2
+            displayName: 'Submit Training Jobs'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "🚀 Submitting training jobs for changed circuits..."
+                
+                python3 << 'EOF'
+                import json
+                import subprocess
+                import sys
+                import yaml
+                import hashlib
+                
+                with open('$(Pipeline.Workspace)/changed_circuits.json', 'r') as f:
+                    changed = json.load(f)
+                
+                circuits = changed.get('circuits', [])
+                
+                if not circuits:
+                    print("ℹ️  No circuits to train")
+                    sys.exit(0)
+                
+                submitted_jobs = []
+                failed_submissions = []
+                
+                for circuit in circuits:
+                    plant_id = circuit['plant_id']
+                    circuit_id = circuit['circuit_id']
+                    cutoff_date = circuit.get('cutoff_date', '')
+                    
+                    print(f"\n📊 Submitting training job: {plant_id}_{circuit_id}")
+                    
+                    circuit_config = f'config/circuits/{plant_id}_{circuit_id}.yaml'
+                    
+                    # Query for latest MLTable version with matching tags
+                    data_name = f"{plant_id}_{circuit_id}"
+                    
+                    with open(circuit_config, 'r') as cf:
+                        circuit_cfg = yaml.safe_load(cf)
+                    
+                    features = circuit_cfg.get('features', [])
+                    feature_str = ','.join(sorted(features))
+                    feature_hash = hashlib.md5(feature_str.encode()).hexdigest()[:8]
+                    
+                    query_cmd = [
+                        'az', 'ml', 'data', 'list',
+                        '--name', data_name,
+                        '--query', f"[?tags.cutoff_date=='{cutoff_date}' && tags.feature_hash=='{feature_hash}'] | [-1].version",
+                        '-o', 'tsv'
+                    ]
+                    
+                    query_result = subprocess.run(query_cmd, capture_output=True, text=True)
+                    
+                    if query_result.returncode != 0 or not query_result.stdout.strip():
+                        print(f"   ❌ ERROR: No MLTable found")
+                        failed_submissions.append({
+                            'plant_id': plant_id,
+                            'circuit_id': circuit_id,
+                            'error': 'MLTable not found'
+                        })
+                        continue
+                    
+                    data_version = query_result.stdout.strip()
+                    mltable_uri = f"azureml:{data_name}:{data_version}"
+                    
+                    print(f"   Found MLTable: {data_name}:v{data_version}")
+                    
+                    timestamp = cutoff_date.replace('-', '_').replace(':', '_')
+                    job_name = f"{plant_id}_{circuit_id}_{timestamp}_v{data_version}"
+                    
+                    print(f"   Job: {job_name}")
+                    
+                    cmd = [
+                        'az', 'ml', 'job', 'create',
+                        '--file', 'pipelines/single-circuit-training.yaml',
+                        '--name', job_name,
+                        '--set', f'inputs.circuit_config.path={circuit_config}',
+                        '--set', f'inputs.training_data.path={mltable_uri}',
+                        '--query', 'name',
+                        '-o', 'tsv'
+                    ]
+                    
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    
+                    if result.returncode == 0:
+                        job_name = result.stdout.strip()
+                        submitted_jobs.append({
+                            'job_name': job_name,
+                            'plant_id': plant_id,
+                            'circuit_id': circuit_id,
+                            'cutoff_date': cutoff_date,
+                            'model_name': circuit.get('model_name', f'{plant_id.lower()}-{circuit_id.lower()}')
+                        })
+                        print(f"   ✅ Submitted: {job_name}")
+                    else:
+                        print(f"   ❌ Failed: {result.stderr}")
+                        failed_submissions.append({
+                            'plant_id': plant_id,
+                            'circuit_id': circuit_id,
+                            'error': result.stderr
+                        })
+                
+                # Save job info
+                with open('training_jobs.json', 'w') as f:
+                    json.dump({
+                        'submitted_jobs': submitted_jobs,
+                        'failed_submissions': failed_submissions
+                    }, f, indent=2)
+                
+                print(f"\n{'='*60}")
+                print(f"Submission Summary:")
+                print(f"  ✅ Submitted: {len(submitted_jobs)}")
+                print(f"  ❌ Failed: {len(failed_submissions)}")
+                print(f"{'='*60}\n")
+                
+                if submitted_jobs:
+                    print("✅ Training jobs submitted successfully")
+                else:
+                    print("⚠️  No training jobs submitted")
+                EOF
+          
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Training Jobs Info'
+            inputs:
+              targetPath: 'training_jobs.json'
+              artifact: 'training_jobs'
+      
+      - job: MonitorTrainingJobs
+        displayName: 'Monitor Training Jobs'
+        dependsOn: SubmitTrainingJobs
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: 'training_jobs'
+              path: $(Pipeline.Workspace)
+          
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+          
+          - task: AzureCLI@2
+            displayName: 'Wait for Training Completion'
+            name: monitorJobs
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                pip install -q azure-ai-ml azure-identity
+                
+                python3 << 'EOF'
+                import json
+                import time
+                import sys
+                from azure.identity import DefaultAzureCredential
+                from azure.ai.ml import MLClient
+                from datetime import datetime
+                
+                with open('$(Pipeline.Workspace)/training_jobs.json', 'r') as f:
+                    data = json.load(f)
+                
+                submitted_jobs = data.get('submitted_jobs', [])
+                
+                if not submitted_jobs:
+                    print("ℹ️  No jobs to wait for")
+                    sys.exit(0)
+                
+                job_names = [job['job_name'] for job in submitted_jobs]
+                
+                print(f"📊 Waiting for {len(job_names)} training job(s)...\n")
+                
+                credential = DefaultAzureCredential()
+                ml_client = MLClient(
+                    credential=credential,
+                    subscription_id='$(subscriptionId)',
+                    resource_group_name='$(resourceGroup)',
+                    workspace_name='$(workspaceName)'
+                )
+                
+                pending = set(job_names)
+                completed = []
+                failed = []
+                
+                poll_count = 0
+                while pending:
+                    poll_count += 1
+                    
+                    for job_name in list(pending):
+                        try:
+                            job = ml_client.jobs.get(job_name)
+                            status = job.status
+                            
+                            if status in ['Completed']:
+                                print(f"✅ {job_name}: {status}")
+                                completed.append(job_name)
+                                pending.remove(job_name)
+                            elif status in ['Failed', 'Canceled']:
+                                print(f"❌ {job_name}: {status}")
+                                failed.append(job_name)
+                                pending.remove(job_name)
+                            elif poll_count % 10 == 0:
+                                print(f"⏳ {job_name}: {status}")
+                        
+                        except Exception as e:
+                            print(f"⚠️  Error checking {job_name}: {e}")
+                    
+                    if pending:
+                        time.sleep(30)
+                
+                print(f"\n{'='*60}")
+                print(f"Training Summary:")
+                print(f"  ✅ Completed: {len(completed)}")
+                print(f"  ❌ Failed: {len(failed)}")
+                print(f"{'='*60}\n")
+                
+                # Set output variables
+                if failed:
+                    print("##vso[task.setvariable variable=hasTrainingFailures;isOutput=true]true")
+                    
+                    # Save failed jobs for retry
+                    failed_jobs_dict = {}
+                    for job in submitted_jobs:
+                        if job['job_name'] in failed:
+                            key = f"{job['plant_id']}_{job['circuit_id']}"
+                            failed_jobs_dict[key] = job
+                    
+                    with open('failed_jobs.json', 'w') as f:
+                        json.dump({'failed_jobs': failed_jobs_dict}, f, indent=2)
+                else:
+                    print("##vso[task.setvariable variable=hasTrainingFailures;isOutput=true]false")
+                
+                if not completed:
+                    print("❌ No jobs completed successfully")
+                    sys.exit(1)
+                
+                print("✅ Training monitoring complete")
+                EOF
+          
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Failed Jobs'
+            condition: eq(variables['monitorJobs.hasTrainingFailures'], 'true')
+            inputs:
+              targetPath: 'failed_jobs.json'
+              artifact: 'failed_jobs'
+      
+      - job: RegisterModels
+        displayName: 'Register Models in Dev Workspace'
+        dependsOn: MonitorTrainingJobs
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+          
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: 'training_jobs'
+              path: $(Pipeline.Workspace)
+          
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+          
+          - task: AzureCLI@2
+            displayName: 'Register Trained Models'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                pip install -q azure-ai-ml azure-identity pyyaml
+                
+                python3 << 'EOF'
+                import json
+                import yaml
+                import hashlib
+                from azure.identity import DefaultAzureCredential
+                from azure.ai.ml import MLClient
+                from azure.ai.ml.entities import Model
+                from azure.core.exceptions import ResourceNotFoundError
+                
+                with open('$(Pipeline.Workspace)/training_jobs.json', 'r') as f:
+                    data = json.load(f)
+                
+                submitted_jobs = data.get('submitted_jobs', [])
+                
+                if not submitted_jobs:
+                    print("ℹ️  No jobs to register models for")
+                    exit(0)
+                
+                credential = DefaultAzureCredential()
+                ml_client = MLClient(
+                    credential=credential,
+                    subscription_id='$(subscriptionId)',
+                    resource_group_name='$(resourceGroup)',
+                    workspace_name='$(workspaceName)'
+                )
+                
+                registered_models = []
+                failed = []
+                
+                for job_info in submitted_jobs:
+                    job_name = job_info['job_name']
+                    model_name = job_info['model_name']
+                    plant_id = job_info['plant_id']
+                    circuit_id = job_info['circuit_id']
+                    cutoff_date = job_info['cutoff_date']
+                    
+                    print(f"\n📊 Registering model from job: {job_name}")
+                    
+                    try:
+                        job = ml_client.jobs.get(job_name)
+                        
+                        if job.status != 'Completed':
+                            print(f"   ⚠️  Job not completed: {job.status}")
+                            failed.append(f"{plant_id}_{circuit_id}")
+                            continue
+                        
+                        # Load config hash
+                        config_file = f'config/circuits/{plant_id}_{circuit_id}.yaml'
+                        with open(config_file, 'r') as f:
+                            circuit_cfg = yaml.safe_load(f)
+                        
+                        config_str = json.dumps(circuit_cfg, sort_keys=True)
+                        config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
+                        
+                        # Register model from job output
+                        model_path = f"azureml://jobs/{job_name}/outputs/model"
+                        
+                        model = Model(
+                            name=model_name,
+                            path=model_path,
+                            type="mlflow_model",
+                            description=f"Model for {plant_id}/{circuit_id}",
+                            tags={
+                                "plant_id": plant_id,
+                                "circuit_id": circuit_id,
+                                "cutoff_date": cutoff_date,
+                                "config_hash": config_hash,
+                                "training_job": job_name,
+                                "environment": "dev"
+                            }
+                        )
+                        
+                        registered_model = ml_client.models.create_or_update(model)
+                        version = registered_model.version
+                        
+                        print(f"   ✅ Registered: {model_name}:v{version}")
+                        
+                        registered_models.append({
+                            'model_name': model_name,
+                            'version': str(version),
+                            'plant_id': plant_id,
+                            'circuit_id': circuit_id,
+                            'cutoff_date': cutoff_date,
+                            'config_hash': config_hash,
+                            'training_job': job_name
+                        })
+                    
+                    except Exception as e:
+                        print(f"   ❌ Error: {e}")
+                        failed.append(f"{plant_id}_{circuit_id}")
+                
+                # Save registered models
+                with open('registered_models.json', 'w') as f:
+                    json.dump({'models': registered_models}, f, indent=2)
+                
+                print(f"\n{'='*60}")
+                print(f"Registration Summary:")
+                print(f"  ✅ Registered: {len(registered_models)}")
+                print(f"  ❌ Failed: {len(failed)}")
+                print(f"{'='*60}\n")
+                
+                if not registered_models:
+                    print("⚠️  No models were successfully registered")
+                EOF
+          
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Registered Models'
+            inputs:
+              targetPath: 'registered_models.json'
+              artifact: 'registered_models'
+
+  # ============================================
+  # PROMOTE TO REGISTRY
+  # ============================================
+  - stage: PromoteToRegistry
+    displayName: 'Promote to Registry (Approval Required)'
+    dependsOn: TrainModels
+    condition: and(succeeded(), ne('${{ parameters.skipPromotion }}', 'true'))
+    jobs:
+      - deployment: ApprovalGate
+        displayName: 'ML Engineer Approval'
+        environment: 'registry-promotion'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                
+                - task: DownloadPipelineArtifact@2
+                  inputs:
+                    artifact: 'registered_models'
+                    path: $(Pipeline.Workspace)
+                
+                - script: |
+                    echo "📋 Models ready for promotion to Registry:"
+                    python3 << 'EOF'
+                    import json
+                    with open('$(Pipeline.Workspace)/registered_models.json', 'r') as f:
+                        data = json.load(f)
+                    models = data.get('models', [])
+                    for model in models:
+                        print(f"  - {model['model_name']}:v{model['version']} (config_hash={model['config_hash']})")
+                    EOF
+                  displayName: 'Show Models for Promotion'
+                
+                - task: UsePythonVersion@0
+                  inputs:
+                    versionSpec: '$(pythonVersion)'
+                
+                - task: AzureCLI@2
+                  displayName: 'Promote Models to Registry'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      pip install -q azure-ai-ml azure-identity
+                      
+                      python3 << 'MODEOF'
+                      import json
+                      import subprocess
+                      
+                      with open('$(Pipeline.Workspace)/registered_models.json', 'r') as f:
+                          data = json.load(f)
+                      
+                      models = data.get('models', [])
+                      
+                      if not models:
+                          print("ℹ️  No models to promote")
+                          exit(0)
+                      
+                      print(f"🚀 Promoting {len(models)} model(s) to Registry...")
+                      
+                      promoted = []
+                      failed = []
+                      
+                      for model in models:
+                          model_name = model['model_name']
+                          model_version = model['version']
+                          config_hash = model['config_hash']
+                          
+                          print(f"\n📊 Promoting: {model_name}:v{model_version}")
+                          
+                          # Check if already exists in Registry
+                          check_cmd = [
+                              'az', 'ml', 'model', 'list',
+                              '--name', model_name,
+                              '--registry-name', '$(registryName)',
+                              '--resource-group', '$(registryResourceGroup)',
+                              '--query', f"[?tags.config_hash=='{config_hash}' && version=='{model_version}'].version",
+                              '-o', 'tsv'
+                          ]
+                          
+                          check_result = subprocess.run(check_cmd, capture_output=True, text=True)
+                          
+                          if check_result.returncode == 0 and check_result.stdout.strip():
+                              print(f"   ✅ Already exists in Registry")
+                              promoted.append(f"{model_name}:v{model_version}")
+                              continue
+                          
+                          # Share model to Registry
+                          share_cmd = [
+                              'az', 'ml', 'model', 'share',
+                              '--name', model_name,
+                              '--version', model_version,
+                              '--workspace-name', '$(workspaceName)',
+                              '--resource-group', '$(resourceGroup)',
+                              '--registry-name', '$(registryName)',
+                              '--share-with-name', model_name,
+                              '--share-with-version', model_version
+                          ]
+                          
+                          result = subprocess.run(share_cmd, capture_output=True, text=True)
+                          
+                          if result.returncode != 0:
+                              print(f"   ❌ Failed: {result.stderr}")
+                              failed.append(f"{model_name}:v{model_version}")
+                          else:
+                              print(f"   ✅ Promoted to Registry")
+                              promoted.append(f"{model_name}:v{model_version}")
+                      
+                      print(f"\n{'='*60}")
+                      print(f"Promotion Summary:")
+                      print(f"  ✅ Promoted: {len(promoted)}")
+                      print(f"  ❌ Failed: {len(failed)}")
+                      print(f"{'='*60}\n")
+                      
+                      if failed:
+                          print("❌ Some models failed to promote")
+                          exit(1)
+                      
+                      print("✅ All models promoted successfully")
+                      MODEOF

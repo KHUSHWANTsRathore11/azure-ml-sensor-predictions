@@ -1,38 +1,89 @@
-# Pipeline Organization
+# Pipeline Architecture
 
-This project separates Azure DevOps pipelines from Azure ML pipelines for clarity.
+This project uses **3 separated pipelines** for better maintainability and independent execution.
 
 ## Directory Structure
 
 ```
 .azuredevops/               # Azure DevOps CI/CD Pipelines
-├── build-pipeline.yml      # Main build pipeline (corrected architecture)
-├── release-pipeline.yml    # Release/deployment pipeline
-└── environment-only-pipeline.yml  # Environment update pipeline
+├── pr-validation-pipeline.yml      # ⭐ PR validation (all branches)
+├── training-pipeline.yml           # ⭐ Train models in Dev (develop branch)
+├── test-deployment-pipeline.yml    # ⭐ Deploy to Test (release/* branches)
+├── prod-deployment-pipeline.yml    # ⭐ Deploy to Production (main branch)
+├── templates/                      # Shared reusable templates
+│   ├── install-ml-extension.yml
+│   ├── configure-ml-defaults.yml
+│   └── generate-circuit-configs.yml
+├── build-pipeline.yml              # 🗄️ Old monolithic pipeline (archived)
+└── PIPELINES.md                    # Quick reference guide
 
 pipelines/                  # Azure ML Training Pipelines
-├── single-circuit-training.yaml   # Single circuit training (used by matrix jobs)
-└── training-pipeline-components.yaml  # Multi-circuit training (alternative)
+├── single-circuit-training.yaml   # Single circuit training job
+└── training-pipeline-components.yaml  # Multi-circuit alternative
 ```
 
 ## Azure DevOps Pipelines (`.azuredevops/`)
 
 These are **CI/CD orchestration pipelines** that run in Azure DevOps:
 
-### `build-pipeline.yml` (Primary)
-- Triggers on PR/commit to circuits.yaml, components, environment
-- **Stage 1**: Register environment, components, MLTable assets (per circuit)
-- **Stage 2**: Parallel training using matrix strategy (DevOps-level parallelism)
-- **Stage 3**: Validate and tag trained models
+### ✅ `pr-validation-pipeline.yml` (All PRs)
+**Purpose:** Validate configuration files and check ML asset versions
 
-### `release-pipeline.yml`
-- Promotes components to shared registry
-- Deploys to Test → Prod environments
-- Manual approval gates
+**Trigger:** PRs to `develop`, `release/*`, `main` branches
 
-### `environment-only-pipeline.yml`
-- Updates only the Python environment
-- Useful for dependency updates without retraining
+**Stages:**
+1. **Validate Configs** - YAML syntax, required fields, formats
+2. **Check ML Assets** - Warn if versions already exist in target workspace
+3. **Lint and Format** - Python code quality checks (flake8, black)
+4. **Summary** - Display validation results
+
+**Benefits:**
+- Fast feedback on PRs (~2-3 minutes)
+- Prevents invalid configs from being merged
+- No training or deployment - pure validation
+- Runs independently for each PR
+
+### 🚀 `training-pipeline.yml` (Develop Branch)
+**Purpose:** Train ML models in Dev workspace and promote to Registry
+
+**Trigger:** Auto on merge to `develop` branch or manual
+
+**Stages:**
+1. **Register Infrastructure** - Environment, components, MLTables
+2. **Train Models** - Submit jobs, monitor, register models
+3. **Promote to Registry** - Share models to Registry (with approval)
+
+**Parameters:**
+- `manualCircuits` - Specific circuits to train
+- `skipPromotion` - Skip Registry promotion
+
+### 🧪 `test-deployment-pipeline.yml` (Release Branches)
+**Purpose:** Deploy models from Registry to Test workspace
+
+**Trigger:** Auto on `release/*` branches or manual
+
+**Stages:**
+1. **Verify Registry** - Query models by config_hash
+2. **Deploy to Test** - Create batch endpoints (with approval)
+3. **Integration Tests** - Run smoke tests
+4. **QA Sign-Off** - Tag as production_ready (with approval)
+
+### 🚨 `prod-deployment-pipeline.yml` (Main Branch)
+**Purpose:** Deploy production-ready models to Production
+
+**Trigger:** Auto on `main` branch or manual
+
+**Stages:**
+1. **Verify Registry** - Query production_ready models
+2. **Deploy to Production** - Production endpoints (with dual approval)
+3. **Production Validation** - Health checks
+
+### 📦 Shared Templates
+**Purpose:** Reusable steps across all pipelines
+
+- `install-ml-extension.yml` - Install Azure ML CLI (stable only)
+- `configure-ml-defaults.yml` - Set workspace defaults
+- `generate-circuit-configs.yml` - Generate circuit configs
 
 ## Azure ML Pipelines (`pipelines/`)
 

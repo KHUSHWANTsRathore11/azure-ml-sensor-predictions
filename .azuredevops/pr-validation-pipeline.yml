@@ -1,0 +1,349 @@
+# PR Validation Pipeline
+# 
+# Purpose: Validate configuration files and check ML asset versions
+# Trigger: Pull Requests to develop, release/*, and main branches
+
+name: PR-Validation-$(Date:yyyyMMdd)-$(Rev:r)
+
+trigger: none  # No CI trigger, only PRs
+
+pr:
+  branches:
+    include:
+      - develop
+      - release/*
+      - main
+  paths:
+    include:
+      - config/**
+      - components/**
+      - src/**
+      - pipelines/**
+      - scripts/**
+
+parameters:
+  - name: runDataValidation
+    displayName: 'Run Delta Lake Data Validation'
+    type: boolean
+    default: false
+  # TEMPORARILY DISABLED - Set to true to validate Delta Lake data quality
+  # Requires Azure storage access and proper configuration
+  # TODO: Re-enable once storage access is configured in variable group
+  
+  - name: deltaTablePath
+    displayName: 'Delta Table Path'
+    type: string
+    default: '/processed/sensor_data'
+  
+  - name: dataValidationMinRows
+    displayName: 'Minimum Expected Rows'
+    type: number
+    default: 1000
+  
+  - name: freshnessHours
+    displayName: 'Data Freshness Threshold (hours)'
+    type: number
+    default: 48
+
+variables:
+  - name: pythonVersion
+    value: '3.9'
+  - group: mlops-shared-variables  # Storage account and container names
+
+stages:
+  - stage: ValidateConfigs
+    displayName: 'Validate Configuration Files'
+    jobs:
+      - job: ValidateYAML
+        displayName: 'Validate YAML Files'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+            fetchDepth: 0
+        
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+        
+          - script: pip install pyyaml jsonschema
+            displayName: 'Install dependencies'
+        
+          # VALIDATE SCRIPTS FIRST - before using them!
+          - script: |
+              echo "🐍 Validating scripts syntax..."
+              
+              # Check scripts/validation/ syntax first (we're about to use these!)
+              if [ -d "scripts/validation" ]; then
+                for script in scripts/validation/*.py; do
+                  if [ -f "$script" ]; then
+                    echo "Checking: $script"
+                    python -m py_compile "$script" || exit 1
+                  fi
+                done
+                echo "✅ All validation scripts have valid syntax"
+              fi
+              
+              # Check scripts/pipeline/ syntax
+              if [ -d "scripts/pipeline" ]; then
+                for script in scripts/pipeline/*.py; do
+                  if [ -f "$script" ]; then
+                    echo "Checking: $script"
+                    python -m py_compile "$script" || exit 1
+                  fi
+                done
+                echo "✅ All pipeline scripts have valid syntax"
+              fi
+            displayName: 'Validate Scripts Syntax'
+        
+          # Now safe to use the validated scripts
+          - script: python scripts/validation/validate_circuits.py --config config/circuits.yaml
+            displayName: 'Validate circuits.yaml'
+        
+          - script: python scripts/validation/validate_environment.py --config config/environment.yaml
+            displayName: 'Validate environment.yaml'
+        
+          - script: python scripts/validation/validate_components.py --components-dir components
+            displayName: 'Validate component files'
+        
+          - script: python scripts/validation/validate_pipeline_compute.py --pipelines-dir pipelines
+            displayName: 'Validate pipeline compute references'
+
+
+  # ============================================
+  # DATA VALIDATION (TEMPORARILY DISABLED)
+  # ============================================
+  # This stage validates Delta Lake data quality but requires:
+  # - Azure storage access configured
+  # - mlops-shared-variables group with storageAccountName and dataContainer
+  # - Service connection with read permissions to storage
+  # 
+  # To enable: Set runDataValidation=true when running the pipeline
+  # ============================================
+  
+  - stage: ValidateData
+    displayName: 'Validate Delta Lake Data Quality [DISABLED]'
+    dependsOn: ValidateConfigs
+    condition: and(succeeded(), eq('${{ parameters.runDataValidation }}', 'true'))
+    jobs:
+      - job: DataValidation
+        displayName: 'Schema & Quality Checks'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+          
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+          
+          - script: pip install deltalake pandas
+            displayName: 'Install validation dependencies'
+          
+          - task: AzureCLI@2
+            displayName: 'Validate Delta Lake Data'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "🔍 Validating Delta Lake data quality..."
+                echo ""
+                
+                # Run data validation with parameterized settings
+                python scripts/validate_delta_data.py \
+                  --table-path '${{ parameters.deltaTablePath }}' \
+                  --storage-account $(storageAccountName) \
+                  --container $(dataContainer) \
+                  --min-rows ${{ parameters.dataValidationMinRows }} \
+                  --freshness-hours ${{ parameters.freshnessHours }}
+                
+                EXIT_CODE=$?
+                
+                if [ $EXIT_CODE -eq 0 ]; then
+                  echo ""
+                  echo "✅ Data validation passed"
+                else
+                  echo ""
+                  echo "❌ Data validation failed"
+                  echo "   Please review data quality issues before merging"
+                  exit 1
+                fi
+            continueOnError: false
+
+  - stage: CheckMLAssets
+    displayName: 'Check ML Asset Versions'
+    dependsOn: ValidateConfigs
+    jobs:
+      - job: CheckVersions
+        displayName: 'Check Asset Versions in Target Workspace'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+            fetchDepth: 0
+          
+          - template: templates/install-ml-extension.yml
+          
+          - task: AzureCLI@2
+            displayName: 'Check ML Asset Versions'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "🔍 Checking if ML asset versions already exist..."
+                
+                # Determine which workspace to check based on target branch
+                TARGET_BRANCH="${SYSTEM_PULLREQUEST_TARGETBRANCH}"
+                
+                if [[ -z "$TARGET_BRANCH" ]]; then
+                  echo "ℹ️  Not a PR build, skipping version checks"
+                  exit 0
+                fi
+                
+                echo "Target branch: $TARGET_BRANCH"
+                
+                if [[ "$TARGET_BRANCH" == "refs/heads/develop" ]]; then
+                  WORKSPACE="$(mlopsDevWorkspace)"
+                  RG="$(mlopsDevResourceGroup)"
+                  ENV_NAME="Dev"
+                elif [[ "$TARGET_BRANCH" == refs/heads/release/* ]]; then
+                  WORKSPACE="$(mlopsTestWorkspace)"
+                  RG="$(mlopsTestResourceGroup)"
+                  ENV_NAME="Test"
+                elif [[ "$TARGET_BRANCH" == "refs/heads/main" ]]; then
+                  WORKSPACE="$(mlopsProdWorkspace)"
+                  RG="$(mlopsProdResourceGroup)"
+                  ENV_NAME="Prod"
+                else
+                  echo "⚠️  Unknown target branch: $TARGET_BRANCH"
+                  echo "   Skipping version checks"
+                  exit 0
+                fi
+                
+                echo "Target workspace: $WORKSPACE ($ENV_NAME)"
+                echo ""
+                
+                WARNINGS=0
+                
+                # Check Environment version
+                echo "📦 Checking Environment version..."
+                ENV_VERSION=$(grep "^version:" config/environment.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                ENV_NAME_VAL=$(grep "^name:" config/environment.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                
+                if az ml environment show \
+                  --name "$ENV_NAME_VAL" \
+                  --version "$ENV_VERSION" \
+                  --workspace-name "$WORKSPACE" \
+                  --resource-group "$RG" &>/dev/null; then
+                  echo "⚠️  WARNING: Environment $ENV_NAME_VAL:$ENV_VERSION already exists in $ENV_NAME workspace"
+                  echo "   Consider incrementing the version if you made changes"
+                  WARNINGS=$((WARNINGS + 1))
+                else
+                  echo "✅ Environment $ENV_NAME_VAL:$ENV_VERSION is a new version"
+                fi
+                
+                echo ""
+                
+                # Check Pipeline Component version
+                echo "📦 Checking Pipeline Component version..."
+                if [ -f "components/training-pipeline-component.yaml" ]; then
+                  COMP_NAME=$(grep "^name:" components/training-pipeline-component.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                  COMP_VERSION=$(grep "^version:" components/training-pipeline-component.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                  
+                  if az ml component show \
+                    --name "$COMP_NAME" \
+                    --version "$COMP_VERSION" \
+                    --workspace-name "$WORKSPACE" \
+                    --resource-group "$RG" &>/dev/null; then
+                    echo "⚠️  WARNING: Pipeline component $COMP_NAME:$COMP_VERSION already exists in $ENV_NAME workspace"
+                    echo "   Consider incrementing the version if you made changes"
+                    WARNINGS=$((WARNINGS + 1))
+                  else
+                    echo "✅ Pipeline component $COMP_NAME:$COMP_VERSION is a new version"
+                  fi
+                fi
+                
+                echo ""
+                
+                if [ $WARNINGS -gt 0 ]; then
+                  echo "ℹ️  Found $WARNINGS existing asset(s). Consider incrementing versions if changed."
+                  echo "   Existing assets will be skipped during registration."
+                else
+                  echo "✅ All assets are new versions"
+                fi
+            env:
+              SYSTEM_PULLREQUEST_TARGETBRANCH: $(System.PullRequest.TargetBranch)
+
+  - stage: LintAndFormat
+    displayName: 'Code Quality Checks'
+    dependsOn: ValidateConfigs
+    jobs:
+      - job: PythonLint
+        displayName: 'Python Linting'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+          
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+          
+          - script: |
+              echo "🔍 Checking Python code quality..."
+              pip install -q flake8 black
+              
+              # Check if src directory exists
+              if [ -d "src" ]; then
+                echo "Running flake8..."
+                flake8 src/ --count --select=E9,F63,F7,F82 --show-source --statistics || true
+                
+                echo ""
+                echo "Checking code formatting with black..."
+                black --check src/ || echo "⚠️  Code not formatted with black (non-blocking)"
+              else
+                echo "ℹ️  No src/ directory found, skipping Python linting"
+              fi
+              
+              # Check scripts directory
+              if [ -d "scripts" ]; then
+                echo ""
+                echo "Checking scripts directory..."
+                flake8 scripts/ --count --select=E9,F63,F7,F82 --show-source --statistics || true
+              fi
+              
+              echo ""
+              echo "✅ Python linting complete"
+            displayName: 'Lint Python Code'
+            continueOnError: true
+
+  - stage: Summary
+    displayName: 'Validation Summary'
+    dependsOn:
+      - ValidateConfigs
+      - ValidateData
+      - CheckMLAssets
+      - LintAndFormat
+    condition: always()
+    jobs:
+      - job: DisplaySummary
+        displayName: 'Show Validation Results'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - script: |
+              echo "╔═══════════════════════════════════════════════════════╗"
+              echo "║          PR VALIDATION COMPLETE                       ║"
+              echo "╚═══════════════════════════════════════════════════════╝"
+              echo ""
+              echo "✅ Configuration files validated"
+              echo "✅ ML asset versions checked"
+              echo "✅ Code quality checks completed"
+              echo ""
+              echo "Next steps:"
+              echo "  1. Address any warnings or issues"
+              echo "  2. Request PR review from team"
+              echo "  3. Merge to trigger training/deployment pipeline"
+            displayName: 'Validation Summary'

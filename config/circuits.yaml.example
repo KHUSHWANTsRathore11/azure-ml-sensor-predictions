@@ -1,0 +1,59 @@
+# Circuit Training Configuration
+# Each circuit can have its own feature set and Delta table path
+
+circuits:
+  - plant_id: flottec
+    circuit_id: 2110
+    cutoff_date: "2024-01-15"
+    model_name: flottec-2110
+    
+    # Delta table configuration
+    delta_table_path: "sensors/flottec_2110"  # Path on ADLS Gen2
+    # OR use shared Delta table: delta_table_path: "sensors/all_circuits"
+    
+    # Feature columns to include (optional - if not specified, uses defaults)
+    features:
+      - plant_id
+      - circuit_id
+      - timestamp
+      - temperature
+      - pressure
+      - vibration
+      - current
+      - voltage
+      - flow_rate
+      - rpm  # Circuit-specific feature
+      - target
+    
+    # Training configuration
+    training:
+      lookback_days: 90
+      validation_split: 0.2
+      
+  - plant_id: flottec
+    circuit_id: 2130
+    cutoff_date: "2024-01-15"
+    model_name: flottec-2130
+    
+    delta_table_path: "sensors/flottec_2130"
+    
+    # Different feature set for this circuit
+    features:
+      - plant_id
+      - circuit_id
+      - timestamp
+      - temperature
+      - pressure
+      - vibration
+      - current
+      - voltage
+      - flow_rate
+      - load_factor  # Different feature
+      - efficiency   # Additional feature
+      - target
+
+# Global Delta table configuration (can be overridden per circuit)
+global_config:
+  adls_account: "yourdatalake"  # Replace with your ADLS Gen2 account
+  container: "bronze"
+  default_delta_path: "sensors/all_circuits"  # If using single Delta table

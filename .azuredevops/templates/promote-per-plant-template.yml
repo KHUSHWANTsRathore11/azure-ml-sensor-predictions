@@ -1,0 +1,95 @@
+# Per-Model Promotion with Plant-Specific Approvals
+#
+# This approach creates individual deployment jobs for each model,
+# allowing plant-specific approvers and independent timelines.
+
+- stage: PromoteToRegistry
+  displayName: '7. Promote to Registry (Per-Model Approval)'
+  dependsOn: RegisterModels
+  condition: and(succeeded(), ne('${{ parameters.skipPromotion }}', 'true'))
+  jobs:
+    # First, parse registered models and create dynamic jobs
+    - job: PreparePromotions
+      displayName: 'Prepare Model Promotions'
+      pool:
+        vmImage: 'ubuntu-latest'
+      steps:
+        - checkout: self
+        
+        - task: DownloadPipelineArtifact@2
+          inputs:
+            artifact: 'registered_models'
+            path: $(Pipeline.Workspace)
+        
+        - task: UsePythonVersion@0
+          inputs:
+            versionSpec: '$(pythonVersion)'
+        
+        - script: |
+            echo "📋 Models ready for promotion:"
+            python3 << 'EOF'
+            import json
+            with open('$(Pipeline.Workspace)/registered_models.json', 'r') as f:
+                data = json.load(f)
+            models = data.get('models', [])
+            for model in models:
+                plant_id = model['plant_id']
+                model_name = model['model_name']
+                version = model['version']
+                print(f"  - {model_name}:v{version} (Plant: {plant_id})")
+                # Set output variable for matrix
+                print(f"##vso[task.setvariable variable=model_{plant_id}_{model['circuit_id']};isOutput=true]{model_name}:{version}")
+            EOF
+          displayName: 'List Models for Promotion'
+          name: modelList
+    
+    # Deploy each model individually with plant-specific approval
+    - ${{ each plant in ['PLANT001', 'PLANT002', 'PLANT003'] }}:
+      - deployment: Promote_${{ plant }}
+        displayName: 'Promote ${{ plant }} Models'
+        dependsOn: PreparePromotions
+        # Plant-specific environment with plant-specific approvers
+        environment: 'registry-promotion-${{ plant }}'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                
+                - task: DownloadPipelineArtifact@2
+                  inputs:
+                    artifact: 'registered_models'
+                    path: $(Pipeline.Workspace)
+                
+                - task: UsePythonVersion@0
+                  inputs:
+                    versionSpec: '$(pythonVersion)'
+                
+                - script: pip install azure-ai-ml azure-identity
+                  displayName: 'Install dependencies'
+                
+                - task: AzureCLI@2
+                  displayName: 'Promote ${{ plant }} Models to Registry'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      # Promote only models for this plant
+                      python scripts/pipeline/promote_to_registry.py \
+                        --registered-models $(Pipeline.Workspace)/registered_models.json \
+                        --subscription-id $(subscriptionId) \
+                        --resource-group $(resourceGroup) \
+                        --workspace-name $(workspaceName) \
+                        --registry-name $(registryName) \
+                        --registry-resource-group $(registryResourceGroup) \
+                        --filter-plant-id ${{ plant }} \
+                        --output promotion_result_${{ plant }}.json
+                
+                - task: PublishPipelineArtifact@1
+                  displayName: 'Publish ${{ plant }} Promotion Result'
+                  inputs:
+                    targetPath: 'promotion_result_${{ plant }}.json'
+                    artifact: 'promotion_result_${{ plant }}'

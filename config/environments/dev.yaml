@@ -1,10 +1,51 @@
 # Development Environment Configuration
 # Branch: develop
 # Workspace: mlops-dev-workspace
+#
+# ⚠️ IMPORTANT: This file is REFERENCE DOCUMENTATION ONLY
+# The actual configuration is managed in Azure DevOps Variable Groups
+# See: docs/VARIABLE_GROUPS_SETUP.md
+#
+# ℹ️ NOTE: Dev is the ONLY environment that handles training
+# Models are promoted to Azure ML Registry, then deployed to Test/Prod
+
+# =============================================================================
+# VARIABLE GROUPS REFERENCE (Training Pipeline)
+# =============================================================================
+# These values should be configured in Azure DevOps Library → Variable Groups
+# Group name: mlops-pipeline-settings
+
+
+variable_groups:
+  mlops_pipeline_settings:
+    # Python & Runtime Settings
+    pythonVersion: "3.9"
+    longRunningJobNotificationIntervalHours: 4
+    mlEngineersEmail: "ml-team@company.com"  # Update with actual email
+    
+    # Monitoring Settings
+    monitoringMaxWaitHours: 3
+    monitoringPollIntervalSeconds: 30
+    monitoringLogLevel: "DEBUG"
+    
+    # Validation Settings
+    validationMinAccuracy: 0.70
+    validationMaxMae: 10.0
+    validationMaxRmse: 15.0
+    
+    # Retention Settings
+    retentionModelsDays: 30
+    retentionLogsDays: 14
+
+# =============================================================================
+# AZURE ML WORKSPACE CONFIGURATION
+# =============================================================================
+# These values are in Variable Group: mlops-dev-variables
 
 environment:
   name: dev
   branch: develop
+
   
 azure:
   subscription_id: "00000000-0000-0000-0000-000000000000"  # Replace with actual subscription

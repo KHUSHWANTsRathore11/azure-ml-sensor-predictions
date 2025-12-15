@@ -46,9 +46,21 @@ parameters:
     default: 48
 
 variables:
-  - name: pythonVersion
-    value: '3.9'
+  # Pipeline execution settings (validation thresholds, Python version, etc.)
+  # Managed via Azure DevOps Library → Variable Groups
+  # See: docs/VARIABLE_GROUPS_SETUP.md
+  - group: mlops-pipeline-settings
   - group: mlops-shared-variables  # Storage account and container names
+  
+  # PR target branch detection
+  - name: targetBranch
+    value: $[coalesce(variables['System.PullRequest.TargetBranch'], 'refs/heads/develop')]
+  - name: isDevPR
+    value: $[eq(variables.targetBranch, 'refs/heads/develop')]
+  - name: isReleasePR
+    value: $[eq(variables.targetBranch, 'refs/heads/release')]
+  - name: isMainPR
+    value: $[eq(variables.targetBranch, 'refs/heads/main')]
 
 stages:
   - stage: ValidateConfigs
@@ -118,13 +130,14 @@ stages:
   # - mlops-shared-variables group with storageAccountName and dataContainer
   # - Service connection with read permissions to storage
   # 
+  # Currently runs: ONLY for Production PRs (to main branch)
   # To enable: Set runDataValidation=true when running the pipeline
   # ============================================
   
   - stage: ValidateData
-    displayName: 'Validate Delta Lake Data Quality [DISABLED]'
+    displayName: 'Validate Delta Lake Data Quality [Prod PRs Only - DISABLED]'
     dependsOn: ValidateConfigs
-    condition: and(succeeded(), eq('${{ parameters.runDataValidation }}', 'true'))
+    condition: and(succeeded(), eq(variables.isProdPR, 'True'), eq('${{ parameters.runDataValidation }}', 'true'))
     jobs:
       - job: DataValidation
         displayName: 'Schema & Quality Checks'
@@ -291,18 +304,52 @@ stages:
             inputs:
               versionSpec: '$(pythonVersion)'
           
+          # Display which validation level is being used
           - script: |
-              echo "🔍 Checking Python code quality..."
+              echo "🎯 Determining lint strictness based on target branch..."
+              echo "Target branch: $(targetBranch)"
+              
+              if [ "$(isProdPR)" == "True" ]; then
+                echo "📊 Validation Level: STRICT (Production PR)"
+                echo "##vso[task.setvariable variable=lintStrictness]strict"
+                echo "##vso[task.setvariable variable=continueOnError]false"
+              elif [ "$(isReleasePR)" == "True" ]; then
+                echo "📊 Validation Level: MODERATE (Release PR)"
+                echo "##vso[task.setvariable variable=lintStrictness]moderate"
+                echo "##vso[task.setvariable variable=continueOnError]false"
+              else
+                echo "📊 Validation Level: LENIENT (Dev PR - warnings only)"
+                echo "##vso[task.setvariable variable=lintStrictness]lenient"
+                echo "##vso[task.setvariable variable=continueOnError]true"
+              fi
+            displayName: 'Determine Lint Strictness'
+          
+          - script: |
+              echo "🔍 Checking Python code quality ($(lintStrictness) mode)..."
               pip install -q flake8 black
               
               # Check if src directory exists
               if [ -d "src" ]; then
-                echo "Running flake8..."
-                flake8 src/ --count --select=E9,F63,F7,F82 --show-source --statistics || true
+                echo "Running flake8 on src/..."
+                
+                if [ "$(lintStrictness)" == "strict" ]; then
+                  echo "   Mode: STRICT - Block on all errors and warnings"
+                  flake8 src/ --count --max-complexity=10 --max-line-length=100 --show-source --statistics
+                elif [ "$(lintStrictness)" == "moderate" ]; then
+                  echo "   Mode: MODERATE - Block on errors only"
+                  flake8 src/ --count --select=E9,F63,F7,F82 --show-source --statistics
+                else
+                  echo "   Mode: LENIENT - Warnings only, non-blocking"
+                  flake8 src/ --count --select=E9,F63,F7,F82 --show-source --statistics || true
+                fi
                 
                 echo ""
                 echo "Checking code formatting with black..."
-                black --check src/ || echo "⚠️  Code not formatted with black (non-blocking)"
+                if [ "$(lintStrictness)" == "strict" ]; then
+                  black --check src/
+                else
+                  black --check src/ || echo "⚠️  Code not formatted with black (non-blocking)"
+                fi
               else
                 echo "ℹ️  No src/ directory found, skipping Python linting"
               fi
@@ -311,13 +358,19 @@ stages:
               if [ -d "scripts" ]; then
                 echo ""
                 echo "Checking scripts directory..."
-                flake8 scripts/ --count --select=E9,F63,F7,F82 --show-source --statistics || true
+                if [ "$(lintStrictness)" == "strict" ]; then
+                  flake8 scripts/ --count --max-complexity=10 --max-line-length=100 --show-source --statistics
+                elif [ "$(lintStrictness)" == "moderate" ]; then
+                  flake8 scripts/ --count --select=E9,F63,F7,F82 --show-source --statistics
+                else
+                  flake8 scripts/ --count --select=E9,F63,F7,F82 --show-source --statistics || true
+                fi
               fi
               
               echo ""
-              echo "✅ Python linting complete"
+              echo "✅ Python linting complete ($(lintStrictness) mode)"
             displayName: 'Lint Python Code'
-            continueOnError: true
+            continueOnError: $(continueOnError)
 
   - stage: Summary
     displayName: 'Validation Summary'

@@ -1,10 +1,53 @@
 # Production Environment Configuration
 # Branch: main
 # Workspace: mlops-prod-workspace
+#
+# ⚠️ IMPORTANT: This file is REFERENCE DOCUMENTATION ONLY
+# The actual configuration is managed in Azure DevOps Variable Groups
+# See: docs/VARIABLE_GROUPS_SETUP.md
+#
+# ℹ️ NOTE: Production environment ONLY handles deployment from Azure ML Registry
+# Training happens in Dev, models are promoted to Registry, then deployed to Prod
+
+# =============================================================================
+# VARIABLE GROUPS REFERENCE
+# =============================================================================
+# These values should be configured in Azure DevOps Library → Variable Groups
+# Group name: mlops-prod-variables
+#
+# Copy these values when creating the Variable Group:
+
+variable_groups:
+  mlops_prod_variables:
+    # Python & Runtime Settings (for deployment scripts)
+    pythonVersion: "3.9"
+    
+    # Deployment Settings (strict approvals)
+    deploymentApprovalRequired: true
+    deploymentApproverEmail: "ml-oncall@company.com,platform-oncall@company.com"
+    deploymentAutoRollback: true
+    
+    # Validation Settings (strictest - for deployment validation)
+    validationMinAccuracy: 0.85
+    validationMaxMae: 5.0
+    validationMaxRmse: 7.0
+    
+    # Retention Settings (compliance)
+    retentionModelsDays: 365  # 1 year
+    retentionLogsDays: 90
+    
+    # Monitoring Settings (for deployed endpoints)
+    monitoringLogLevel: "WARNING"  # Errors only
+
+# =============================================================================
+# AZURE ML WORKSPACE CONFIGURATION
+# =============================================================================
+# Workspace, subscription, resource group, registry settings below
 
 environment:
   name: prod
   branch: main
+
   
 azure:
   subscription_id: "00000000-0000-0000-0000-000000000000"  # Replace with actual subscription

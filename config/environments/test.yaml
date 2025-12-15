@@ -1,10 +1,52 @@
 # Test Environment Configuration
 # Branch: release/*
 # Workspace: mlops-test-workspace
+#
+# ⚠️ IMPORTANT: This file is REFERENCE DOCUMENTATION ONLY
+# The actual configuration is managed in Azure DevOps Variable Groups
+# See: docs/VARIABLE_GROUPS_SETUP.md
+#
+# ℹ️ NOTE: Test environment ONLY handles deployment from Azure ML Registry
+# Training happens in Dev, models are promoted to Registry, then deployed to Test
+
+# =============================================================================
+# VARIABLE GROUPS REFERENCE
+# =============================================================================
+# These values should be configured in Azure DevOps Library → Variable Groups
+# Group name: mlops-test-variables
+#
+# Copy these values when creating the Variable Group:
+
+variable_groups:
+  mlops_test_variables:
+    # Python & Runtime Settings (for deployment scripts)
+    pythonVersion: "3.9"
+    
+    # Deployment Settings
+    deploymentApprovalRequired: true
+    deploymentApproverEmail: "qa-team@company.com"
+    
+    # Validation Settings (for deployment validation)
+    validationMinAccuracy: 0.80
+    validationMaxMae: 7.0
+    validationMaxRmse: 10.0
+    
+    # Retention Settings
+    retentionModelsDays: 90
+    retentionLogsDays: 30
+    
+    # Monitoring Settings (for deployed endpoints)
+    monitoringLogLevel: "INFO"
+
+# =============================================================================
+# AZURE ML WORKSPACE CONFIGURATION
+# =============================================================================
+# Workspace, subscription, resource group settings below
 
 environment:
   name: test
   branch: release/*
+
   
 azure:
   subscription_id: "00000000-0000-0000-0000-000000000000"  # Replace with actual subscription

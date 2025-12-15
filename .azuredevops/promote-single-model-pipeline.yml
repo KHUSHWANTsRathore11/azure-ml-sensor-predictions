@@ -1,0 +1,133 @@
+# Single Model Promotion Pipeline
+# 
+# This pipeline promotes a single model to the registry with approval.
+# Triggered by the main training pipeline for each model individually.
+
+parameters:
+  - name: modelName
+    type: string
+    displayName: 'Model Name'
+  
+  - name: modelVersion
+    type: string
+    displayName: 'Model Version'
+  
+  - name: plantId
+    type: string
+    displayName: 'Plant ID'
+  
+  - name: circuitId
+    type: string
+    displayName: 'Circuit ID'
+  
+  - name: trainingHash
+    type: string
+    displayName: 'Training Hash'
+  
+  - name: cutoffDate
+    type: string
+    displayName: 'Cutoff Date'
+
+variables:
+  - group: mlops-dev-variables
+  - group: mlops-registry-variables
+  - group: mlops-pipeline-settings
+  
+  # Model display name for approval UI
+  - name: modelDisplayName
+    value: '${{ parameters.plantId }}/${{ parameters.circuitId }} - ${{ parameters.modelName }}:v${{ parameters.modelVersion }}'
+
+stages:
+  - stage: ApprovePromotion
+    displayName: 'Approve Model Promotion'
+    jobs:
+      - deployment: ApproveModel
+        displayName: 'Approve: ${{ parameters.modelName }}'
+        # Single environment for all models (change to plant-specific later)
+        environment: 'registry-promotion'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                
+                - script: |
+                    echo "╔════════════════════════════════════════════════════════════╗"
+                    echo "║           MODEL PROMOTION APPROVAL REQUEST                ║"
+                    echo "╚════════════════════════════════════════════════════════════╝"
+                    echo ""
+                    echo "Plant:         ${{ parameters.plantId }}"
+                    echo "Circuit:       ${{ parameters.circuitId }}"
+                    echo "Model:         ${{ parameters.modelName }}"
+                    echo "Version:       ${{ parameters.modelVersion }}"
+                    echo "Training Hash: ${{ parameters.trainingHash }}"
+                    echo "Cutoff Date:   ${{ parameters.cutoffDate }}"
+                    echo ""
+                    echo "This model will be promoted to the shared Azure ML Registry"
+                    echo "for deployment to Test and Production environments."
+                    echo ""
+                  displayName: 'Show Model Details'
+                
+                - task: UsePythonVersion@0
+                  inputs:
+                    versionSpec: '$(pythonVersion)'
+                
+                - script: pip install azure-ai-ml azure-identity
+                  displayName: 'Install dependencies'
+                
+                - task: AzureCLI@2
+                  displayName: 'Promote Model to Registry'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "🚀 Promoting model to registry..."
+                      
+                      # Build model URI from Dev workspace
+                      MODEL_URI="azureml://subscriptions/$(subscriptionId)/resourceGroups/$(resourceGroup)/workspaces/$(workspaceName)/models/${{ parameters.modelName }}/versions/${{ parameters.modelVersion }}"
+                      
+                      # Check if already exists in registry
+                      if az ml model show \
+                        --name "${{ parameters.modelName }}" \
+                        --version "${{ parameters.modelVersion }}" \
+                        --registry-name "$(registryName)" \
+                        --resource-group "$(registryResourceGroup)" &>/dev/null; then
+                        echo "ℹ️  Model already exists in registry, skipping"
+                        exit 0
+                      fi
+                      
+                      # Promote to registry
+                      az ml model create \
+                        --name "${{ parameters.modelName }}" \
+                        --version "${{ parameters.modelVersion }}" \
+                        --path "$MODEL_URI" \
+                        --registry-name "$(registryName)" \
+                        --resource-group "$(registryResourceGroup)" \
+                        --set "tags.plant_id=${{ parameters.plantId }}" \
+                        --set "tags.circuit_id=${{ parameters.circuitId }}" \
+                        --set "tags.cutoff_date=${{ parameters.cutoffDate }}" \
+                        --set "tags.training_hash=${{ parameters.trainingHash }}" \
+                        --set "tags.promoted_from=dev" \
+                        -o json
+                      
+                      if [ $? -eq 0 ]; then
+                        echo "✅ Model promoted successfully"
+                        
+                        # Verify
+                        if az ml model show \
+                          --name "${{ parameters.modelName }}" \
+                          --version "${{ parameters.modelVersion }}" \
+                          --registry-name "$(registryName)" \
+                          --resource-group "$(registryResourceGroup)" &>/dev/null; then
+                          echo "✅ Verified in registry"
+                        else
+                          echo "⚠️  Promoted but verification failed"
+                          exit 1
+                        fi
+                      else
+                        echo "❌ Promotion failed"
+                        exit 1
+                      fi

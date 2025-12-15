@@ -1,23 +1,30 @@
 # Environment Configuration Guide
 
-This directory contains **reference** configuration files that document the settings for each environment. The actual configuration is managed through **Azure DevOps Variable Groups** in the Library.
+This directory contains **reference documentation** for environment-specific settings. 
 
-## Why Variable Groups Instead of YAML Files?
+## ⚠️ Important: Reference Documentation Only
 
-Azure DevOps Variable Groups provide:
-- ✅ **Secure secret storage** - Encrypted credentials and connection strings
-- ✅ **No code changes needed** - Update configs without commits
-- ✅ **Branch-based selection** - Automatically loads correct config per branch
-- ✅ **Easy UI management** - Update values through Azure DevOps portal
-- ✅ **Access control** - Restrict who can modify prod settings
+**These YAML files are NOT loaded by pipelines.** They serve as:
+- 📋 Documentation of what should be configured in Variable Groups
+- 📝 Templates for setting up new environments  
+- 🔍 Reference when creating/updating Variable Groups
+
+**Actual configuration** is managed in **Azure DevOps Library → Variable Groups**.
 
 ## Files (Reference Only)
 
-- **`dev.yaml`** - Development environment reference (branch: `develop`)
-- **`test.yaml`** - Test environment reference (branch: `release/*`)
-- **`prod.yaml`** - Production environment reference (branch: `main`)
+- **`dev.yaml`** - Development environment reference
+- **`test.yaml`** - Test environment reference  
+- **`prod.yaml`** - Production environment reference
+- **`README.md`** - This file
 
-These files document what should be configured in the Variable Groups but are NOT loaded by the pipeline.
+## Quick Start
+
+1. **View** the YAML file for your environment (e.g., `dev.yaml`)
+2. **Copy** values from `variable_groups` section
+3. **Create** Variable Group in Azure DevOps Library
+4. **Paste** values into the Variable Group
+
 
 ## Structure
 

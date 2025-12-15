@@ -14,10 +14,8 @@ Usage:
 """
 
 import argparse
-import hashlib
 import json
 import sys
-import yaml
 from azure.identity import DefaultAzureCredential
 from azure.ai.ml import MLClient
 from azure.ai.ml.entities import Model
@@ -61,8 +59,14 @@ def register_models(
         plant_id = job_info['plant_id']
         circuit_id = job_info['circuit_id']
         cutoff_date = job_info['cutoff_date']
+        training_hash = job_info.get('training_hash')  # Use from job info!
         
         print(f"\n📊 Registering model from job: {job_name}")
+        
+        if not training_hash:
+            print(f"   ⚠️  No training_hash in job info, skipping")
+            failed.append(f"{plant_id}_{circuit_id}")
+            continue
         
         try:
             job = ml_client.jobs.get(job_name)
@@ -72,29 +76,24 @@ def register_models(
                 failed.append(f"{plant_id}_{circuit_id}")
                 continue
             
-            # Load config hash
-            config_file = f'config/circuits/{plant_id}_{circuit_id}.yaml'
-            with open(config_file, 'r') as f:
-                circuit_cfg = yaml.safe_load(f)
-            
-            config_str = json.dumps(circuit_cfg, sort_keys=True)
-            config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
-            
             # Register model from job output
             model_path = f"azureml://jobs/{job_name}/outputs/model"
+            
+            # Get model type from job info (default to custom_model)
+            model_type = job_info.get('model_type', 'custom_model')
             
             model = Model(
                 name=model_name,
                 path=model_path,
-                type="mlflow_model",
+                type=model_type,  # Configurable: custom_model or mlflow_model
                 description=f"Model for {plant_id}/{circuit_id}",
                 tags={
                     "plant_id": plant_id,
                     "circuit_id": circuit_id,
                     "cutoff_date": cutoff_date,
-                    "config_hash": config_hash,
+                    "training_hash": training_hash,  # Consistent with job submission!
                     "training_job": job_name,
-                    "environment": "dev"
+                    "model_type": model_type
                 }
             )
             
@@ -102,6 +101,8 @@ def register_models(
             version = registered_model.version
             
             print(f"   ✅ Registered: {model_name}:v{version}")
+            print(f"   📝 Training hash: {training_hash}")
+            print(f"   🏷️  Model type: {model_type}")
             
             registered_models.append({
                 'model_name': model_name,
@@ -109,7 +110,7 @@ def register_models(
                 'plant_id': plant_id,
                 'circuit_id': circuit_id,
                 'cutoff_date': cutoff_date,
-                'config_hash': config_hash,
+                'training_hash': training_hash,  # Pass to next stage
                 'training_job': job_name
             })
         

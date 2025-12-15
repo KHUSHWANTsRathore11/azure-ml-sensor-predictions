@@ -38,17 +38,15 @@ parameters:
   # Set to true to only train and register, skip promotion
 
 variables:
-  - name: pythonVersion
-    value: '3.9'
-  
-  - name: longRunningJobNotificationIntervalHours
-    value: '4'
-  
-  - name: mlEngineersEmail
-    value: ''
-  
+  # Workspace-specific Azure ML settings
   - group: mlops-dev-variables
   - group: mlops-registry-variables
+  
+  # Pipeline execution settings (monitoring, validation, retention, Python version, etc.)
+  # All pipeline config now managed via Azure DevOps Library → Variable Groups
+  # See: docs/VARIABLE_GROUPS_SETUP.md
+  - group: mlops-pipeline-settings
+
 
 stages:
   # ============================================
@@ -77,6 +75,7 @@ stages:
           
           - task: AzureCLI@2
             displayName: 'Register Custom Environment'
+            name: registerEnv  # Name this step to reference outputs
             inputs:
               azureSubscription: '$(azureServiceConnection)'
               scriptType: 'bash'
@@ -96,15 +95,114 @@ stages:
                   echo "Version $CONFIG_VERSION not found. Registering new environment..."
                   az ml environment create --file config/environment.yaml
                   echo "✅ Environment registered: $ENV_NAME:$CONFIG_VERSION"
+                  
+                  # Set output variable to indicate new registration
+                  echo "##vso[task.setvariable variable=newEnvRegistered;isOutput=true]true"
                 else
                   echo "✅ Environment $ENV_NAME:$CONFIG_VERSION already exists. Skipping registration."
+                  
+                  # Set output variable to indicate no new registration
+                  echo "##vso[task.setvariable variable=newEnvRegistered;isOutput=true]false"
                 fi
 
   # ============================================
-  # STAGE 2: REGISTER COMPONENTS
+  # STAGE 2: PROMOTE ENVIRONMENT TO REGISTRY
+  # ============================================
+  - stage: PromoteEnvironment
+    displayName: '2. Promote Environment to Registry'
+    dependsOn: RegisterEnvironment
+    # Only run if new environment was registered in Stage 1
+    condition: and(succeeded('RegisterEnvironment'), eq(dependencies.RegisterEnvironment.outputs['RegisterEnv.registerEnv.newEnvRegistered'], 'true'))
+    jobs:
+      - deployment: PromoteEnvToRegistry
+        displayName: 'Promote Environment (Approval Required)'
+        environment: 'registry-promotion'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                
+                - script: |
+                    echo "╔════════════════════════════════════════════════════════════╗"
+                    echo "║        ENVIRONMENT PROMOTION APPROVAL REQUEST             ║"
+                    echo "╚════════════════════════════════════════════════════════════╝"
+                    echo ""
+                    
+                    CONFIG_VERSION=$(grep "^version:" config/environment.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                    ENV_NAME=$(grep "^name:" config/environment.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                    
+                    echo "Environment: $ENV_NAME"
+                    echo "Version:     $CONFIG_VERSION"
+                    echo ""
+                    echo "This environment will be promoted to the shared Azure ML Registry"
+                    echo "for use in Test and Production deployments."
+                    echo ""
+                  displayName: 'Show Environment Details'
+                
+                - task: UsePythonVersion@0
+                  inputs:
+                    versionSpec: '$(pythonVersion)'
+                
+                - template: templates/install-ml-extension.yml
+                
+                - task: AzureCLI@2
+                  displayName: 'Promote Environment to Registry'
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    inlineScript: |
+                      echo "🚀 Promoting environment to registry..."
+                      
+                      CONFIG_VERSION=$(grep "^version:" config/environment.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                      ENV_NAME=$(grep "^name:" config/environment.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                      
+                      echo "Environment: $ENV_NAME:$CONFIG_VERSION"
+                      
+                      # Check if already exists in registry
+                      if az ml environment show \
+                        --name "$ENV_NAME" \
+                        --version "$CONFIG_VERSION" \
+                        --registry-name "$(registryName)" \
+                        --resource-group "$(registryResourceGroup)" &>/dev/null; then
+                        echo "ℹ️  Environment already exists in registry, skipping"
+                        exit 0
+                      fi
+                      
+                      # Promote to registry
+                      echo "Promoting $ENV_NAME:$CONFIG_VERSION to registry..."
+                      az ml environment create \
+                        --file config/environment.yaml \
+                        --registry-name "$(registryName)" \
+                        --resource-group "$(registryResourceGroup)"
+                      
+                      if [ $? -eq 0 ]; then
+                        echo "✅ Environment promoted successfully"
+                        
+                        # Verify
+                        if az ml environment show \
+                          --name "$ENV_NAME" \
+                          --version "$CONFIG_VERSION" \
+                          --registry-name "$(registryName)" \
+                          --resource-group "$(registryResourceGroup)" &>/dev/null; then
+                          echo "✅ Verified in registry"
+                        else
+                          echo "⚠️  Promoted but verification failed"
+                          exit 1
+                        fi
+                      else
+                        echo "❌ Promotion failed"
+                        exit 1
+                      fi
+
+  # ============================================
+  # STAGE 3: REGISTER COMPONENTS
   # ============================================
   - stage: RegisterComponents
-    displayName: '2. Register Components'
+    displayName: '3. Register Components'
     dependsOn: RegisterEnvironment
     jobs:
       - job: RegisterPipelineComponent
@@ -150,10 +248,10 @@ stages:
                 fi
 
   # ============================================
-  # STAGE 3: REGISTER MLTABLES
+  # STAGE 4: REGISTER MLTABLES
   # ============================================
   - stage: RegisterMLTables
-    displayName: '3. Register MLTables'
+    displayName: '4. Register MLTables'
     dependsOn: RegisterComponents
     jobs:
       - job: RegisterDataAssets
@@ -182,22 +280,15 @@ stages:
               inlineScript: |
                 python scripts/pipeline/detect_changed_circuits.py \
                   --config config/circuits.yaml \
-                  --output changed_circuits.json \
                   --manual-circuits '${{ parameters.manualCircuits }}' \
                   --workspace-name $(workspaceName) \
                   --resource-group $(resourceGroup)
-          
-          - task: PublishPipelineArtifact@1
-            displayName: 'Publish Changed Circuits List'
-            inputs:
-              targetPath: 'changed_circuits.json'
-              artifact: 'changed_circuits'
 
   # ============================================
-  # STAGE 4: SUBMIT TRAINING
+  # STAGE 5: SUBMIT TRAINING
   # ============================================
   - stage: SubmitTraining
-    displayName: '4. Submit Training Jobs'
+    displayName: '5. Submit Training Jobs'
     dependsOn: RegisterMLTables
     jobs:
       - job: SubmitJobs
@@ -206,11 +297,6 @@ stages:
           vmImage: 'ubuntu-latest'
         steps:
           - checkout: self
-          
-          - task: DownloadPipelineArtifact@2
-            inputs:
-              artifact: 'changed_circuits'
-              path: $(Pipeline.Workspace)
           
           - task: UsePythonVersion@0
             inputs:
@@ -230,23 +316,22 @@ stages:
               scriptLocation: 'inlineScript'
               inlineScript: |
                 python scripts/pipeline/submit_training_jobs.py \
-                  --changed-circuits $(Pipeline.Workspace)/changed_circuits.json \
                   --output training_jobs.json \
                   --pipeline-file pipelines/single-circuit-training.yaml \
                   --workspace-name $(workspaceName) \
                   --resource-group $(resourceGroup)
           
-          - task:PublishPipelineArtifact@1
+          - task: PublishPipelineArtifact@1
             displayName: 'Publish Training Jobs Info'
             inputs:
               targetPath: 'training_jobs.json'
               artifact: 'training_jobs'
 
   # ============================================
-  # STAGE 5: MONITOR TRAINING
+  # STAGE 6: MONITOR TRAINING
   # ============================================
   - stage: MonitorTraining
-    displayName: '5. Monitor Training Jobs'
+    displayName: '6. Monitor Training Jobs'
     dependsOn: SubmitTraining
     jobs:
       - job: WaitForCompletion
@@ -278,6 +363,8 @@ stages:
                   --subscription-id $(subscriptionId) \
                   --resource-group $(resourceGroup) \
                   --workspace-name $(workspaceName) \
+                  --max-wait-hours $(monitoringMaxWaitHours) \
+                  --poll-interval $(monitoringPollIntervalSeconds) \
                   --output monitoring_result.json
           
           - task: PublishPipelineArtifact@1
@@ -287,10 +374,10 @@ stages:
               artifact: 'monitoring_result'
 
   # ============================================
-  # STAGE 6: REGISTER MODELS
+  # STAGE 7: REGISTER MODELS
   # ============================================
   - stage: RegisterModels
-    displayName: '6. Register Models'
+    displayName: '7. Register Models'
     dependsOn: MonitorTraining
     jobs:
       - job: RegisterTrainedModels
@@ -327,71 +414,101 @@ stages:
                   --output registered_models.json
           
           - task: PublishPipelineArtifact@1
-            displayName: 'Publish Registered Models'
-            inputs:
               targetPath: 'registered_models.json'
               artifact: 'registered_models'
 
   # ============================================
-  # STAGE 7: PROMOTE TO REGISTRY
+  # STAGE 8: PROMOTE TO REGISTRY (PER-MODEL CHILD PIPELINES)
   # ============================================
   - stage: PromoteToRegistry
-    displayName: '7. Promote to Registry (Approval Required)'
+    displayName: '8. Promote to Registry (Per-Model Approval)'
     dependsOn: RegisterModels
     condition: and(succeeded(), ne('${{ parameters.skipPromotion }}', 'true'))
     jobs:
-      - deployment: ApprovalGate
-        displayName: 'ML Engineer Approval'
-        environment: 'registry-promotion'
+      - job: TriggerModelPromotions
+        displayName: 'Trigger Promotion Pipelines'
         pool:
           vmImage: 'ubuntu-latest'
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - checkout: self
+        steps:
+          - checkout: self
+          
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: 'registered_models'
+              path: $(Pipeline.Workspace)
+          
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+          
+          - script: |
+              echo "📋 Models ready for promotion (each gets individual approval):"
+              echo ""
+              python3 << 'EOF'
+              import json
+              with open('$(Pipeline.Workspace)/registered_models.json', 'r') as f:
+                  data = json.load(f)
+              models = data.get('models', [])
+              
+              # Group by plant
+              by_plant = {}
+              for model in models:
+                  plant = model['plant_id']
+                  if plant not in by_plant:
+                      by_plant[plant] = []
+                  by_plant[plant].append(model)
+              
+              for plant, plant_models in sorted(by_plant.items()):
+                  print(f"\n{plant}: {len(plant_models)} model(s)")
+                  for model in plant_models:
+                      print(f"  - {model['model_name']}:v{model['version']}")
+              
+              print(f"\n📌 Each model will trigger a separate pipeline run")
+              print(f"📌 Approve each model individually in its own pipeline")
+              EOF
+            displayName: 'List Models for Promotion'
+          
+          - script: pip install requests
+            displayName: 'Install dependencies'
+          
+          - task: Bash@3
+            displayName: 'Trigger Child Pipelines'
+            env:
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo "🚀 Triggering individual promotion pipelines..."
+                echo ""
                 
-                - task: DownloadPipelineArtifact@2
-                  inputs:
-                    artifact: 'registered_models'
-                    path: $(Pipeline.Workspace)
+                # Get Azure DevOps context from predefined variables
+                ORGANIZATION=$(echo "$(System.CollectionUri)" | sed 's|https://dev.azure.com/||' | sed 's|/||')
+                PROJECT="$(System.TeamProject)"
                 
-                - script: |
-                    echo "📋 Models ready for promotion to Registry:"
-                    python3 << 'EOF'
-                    import json
-                    with open('$(Pipeline.Workspace)/registered_models.json', 'r') as f:
-                        data = json.load(f)
-                    models = data.get('models', [])
-                    for model in models:
-                        print(f"  - {model['model_name']}:v{model['version']} (config_hash={model['config_hash']})")
-                    EOF
-                  displayName: 'Show Models for Promotion'
+                # Pipeline ID for promote-single-model-pipeline.yml
+                # TODO: Update this with actual pipeline ID after first run
+                PIPELINE_ID="<REPLACE_WITH_PIPELINE_ID>"
                 
-                - task: UsePythonVersion@0
-                  inputs:
-                    versionSpec: '$(pythonVersion)'
+                python scripts/pipeline/trigger_model_promotions.py \
+                  --registered-models "$(Pipeline.Workspace)/registered_models.json" \
+                  --organization "$ORGANIZATION" \
+                  --project "$PROJECT" \
+                  --pipeline-id "$PIPELINE_ID" \
+                  --output triggered_promotions.json
                 
-                - template: templates/install-ml-extension.yml
-                
-                - task: AzureCLI@2
-                  displayName: 'Promote Models to Registry'
-                  inputs:
-                    azureSubscription: '$(azureServiceConnection)'
-                    scriptType: 'bash'
-                    scriptLocation: 'inlineScript'
-                    inlineScript: |
-                      python scripts/pipeline/promote_to_registry.py \
-                        --registered-models $(Pipeline.Workspace)/registered_models.json \
-                        --subscription-id $(subscriptionId) \
-                        --resource-group $(resourceGroup) \
-                        --workspace-name $(workspaceName) \
-                        --registry-name $(registryName) \
-                        --registry-resource-group $(registryResourceGroup) \
-                        --output promotion_result.json
-                
-                - task: PublishPipelineArtifact@1
-                  displayName: 'Publish Promotion Result'
-                  inputs:
-                    targetPath: 'promotion_result.json'
-                    artifact: 'promotion_result'
+                if [ $? -eq 0 ]; then
+                  echo ""
+                  echo "✅ All promotion pipelines triggered successfully"
+                  echo "📌 Go to Pipelines to approve each model individually"
+                else
+                  echo "❌ Some pipelines failed to trigger"
+                  exit 1
+                fi
+          
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Triggered Pipelines Info'
+            inputs:
+              targetPath: 'triggered_promotions.json'
+              artifact: 'triggered_promotions'
+      
+

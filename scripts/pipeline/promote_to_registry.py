@@ -54,7 +54,7 @@ def promote_to_registry(
         plant_id = model['plant_id']
         circuit_id = model['circuit_id']
         cutoff_date = model['cutoff_date']
-        config_hash = model['config_hash']
+        training_hash = model.get('training_hash', model.get('config_hash'))  # Backward compat
         
         print(f"📦 Promoting: {model_name}:v{model_version}")
         
@@ -78,19 +78,21 @@ def promote_to_registry(
             })
             continue
         
-        # Promote to registry
+        # Build model URI from workspace
+        model_uri = f"azureml://subscriptions/{subscription_id}/resourceGroups/{resource_group}/workspaces/{workspace_name}/models/{model_name}/versions/{model_version}"
+        
+        # Promote to registry using model URI
         promote_cmd = [
             'az', 'ml', 'model', 'create',
             '--name', model_name,
             '--version', model_version,
-            '--workspace-name', workspace_name,
-            '--resource-group', resource_group,
+            '--path', model_uri,  # Reference from workspace
             '--registry-name', registry_name,
-            '--registry-resource-group', registry_resource_group,
+            '--resource-group', registry_resource_group,
             '--set', f'tags.plant_id={plant_id}',
             '--set', f'tags.circuit_id={circuit_id}',
             '--set', f'tags.cutoff_date={cutoff_date}',
-            '--set', f'tags.config_hash={config_hash}',
+            '--set', f'tags.training_hash={training_hash}',
             '--set', 'tags.promoted_from=dev',
             '-o', 'json'
         ]
@@ -99,9 +101,18 @@ def promote_to_registry(
         
         if result.returncode == 0:
             print(f"   ✅ Promoted successfully")
+            
+            # Verify model in registry
+            verify_result = subprocess.run(check_cmd, capture_output=True)
+            if verify_result.returncode == 0:
+                print(f"   ✅ Verified in registry")
+            else:
+                print(f"   ⚠️  Promoted but verification failed")
+            
             promoted.append({
                 'model_name': model_name,
                 'version': model_version,
+                'training_hash': training_hash,
                 'status': 'promoted'
             })
         else:

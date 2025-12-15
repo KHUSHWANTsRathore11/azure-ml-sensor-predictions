@@ -1,0 +1,354 @@
+# Dummy Training Pipeline (Dry Run)
+# 
+# This pipeline simulates the full training workflow without Azure ML connections.
+# Use this to test pipeline logic, conditions, and workflow scenarios.
+
+name: Dummy-Training-$(Date:yyyyMMdd)-$(Rev:r)
+
+trigger: none  # Manual trigger only
+
+parameters:
+  - name: skipPromotion
+    displayName: 'Skip Promotion to Registry'
+    type: boolean
+    default: false
+  
+  - name: simulateNewEnvironment
+    displayName: 'Simulate New Environment Registration'
+    type: boolean
+    default: true
+  
+  - name: simulateCircuitChanges
+    displayName: 'Number of Circuits with Changes'
+    type: number
+    default: 2
+  
+  - name: simulateJobFailures
+    displayName: 'Number of Jobs to Fail'
+    type: number
+    default: 0
+
+variables:
+  - name: pythonVersion
+    value: '3.9'
+
+stages:
+  # ============================================
+  # STAGE 1: REGISTER ENVIRONMENT (SIMULATED)
+  # ============================================
+  - stage: RegisterEnvironment
+    displayName: '1. Register Environment (Simulated)'
+    jobs:
+      - job: RegisterEnv
+        displayName: 'Simulate Environment Registration'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+          
+          - script: |
+              echo "🐳 [SIMULATED] Checking environment..."
+              echo ""
+              echo "Environment: custom-training-env"
+              echo "Version: 1.0.0"
+              echo ""
+              
+              if [ "${{ parameters.simulateNewEnvironment }}" == "True" ]; then
+                echo "✅ [SIMULATED] New environment registered"
+                echo "##vso[task.setvariable variable=newEnvRegistered;isOutput=true]true"
+              else
+                echo "ℹ️  [SIMULATED] Environment already exists, skipping"
+                echo "##vso[task.setvariable variable=newEnvRegistered;isOutput=true]false"
+              fi
+            displayName: 'Simulate Environment Check'
+            name: registerEnv
+
+  # ============================================
+  # STAGE 2: PROMOTE ENVIRONMENT (SIMULATED)
+  # ============================================
+  - stage: PromoteEnvironment
+    displayName: '2. Promote Environment (Simulated)'
+    dependsOn: RegisterEnvironment
+    condition: and(succeeded('RegisterEnvironment'), eq(dependencies.RegisterEnvironment.outputs['RegisterEnv.registerEnv.newEnvRegistered'], 'true'))
+    jobs:
+      - deployment: PromoteEnvToRegistry
+        displayName: 'Simulate Environment Promotion'
+        environment: 'dummy-approval'  # Create this environment for testing approvals
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - script: |
+                    echo "╔════════════════════════════════════════════════════════════╗"
+                    echo "║   [SIMULATED] ENVIRONMENT PROMOTION APPROVAL REQUEST      ║"
+                    echo "╚════════════════════════════════════════════════════════════╝"
+                    echo ""
+                    echo "Environment: custom-training-env"
+                    echo "Version:     1.0.0"
+                    echo ""
+                    echo "[SIMULATED] Waiting for approval..."
+                    echo ""
+                  displayName: 'Show Environment Details'
+                
+                - script: |
+                    echo "🚀 [SIMULATED] Promoting environment to registry..."
+                    sleep 2
+                    echo "✅ [SIMULATED] Environment promoted successfully"
+                    echo "✅ [SIMULATED] Verified in registry"
+                  displayName: 'Simulate Promotion'
+
+  # ============================================
+  # STAGE 3: REGISTER COMPONENTS (SIMULATED)
+  # ============================================
+  - stage: RegisterComponents
+    displayName: '3. Register Components (Simulated)'
+    dependsOn: RegisterEnvironment
+    jobs:
+      - job: RegisterPipelineComponent
+        displayName: 'Simulate Component Registration'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - script: |
+              echo "📦 [SIMULATED] Registering pipeline component..."
+              sleep 1
+              echo "✅ [SIMULATED] Component registered: training-pipeline-component:1.0.0"
+            displayName: 'Simulate Component Registration'
+
+  # ============================================
+  # STAGE 4: REGISTER MLTABLES (SIMULATED)
+  # ============================================
+  - stage: RegisterMLTables
+    displayName: '4. Register MLTables (Simulated)'
+    dependsOn: RegisterComponents
+    jobs:
+      - job: RegisterDataAssets
+        displayName: 'Simulate MLTable Registration'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - script: |
+              echo "📊 [SIMULATED] Detecting changed circuits..."
+              echo ""
+              
+              NUM_CIRCUITS=${{ parameters.simulateCircuitChanges }}
+              echo "Circuits with changes: $NUM_CIRCUITS"
+              echo ""
+              
+              for i in $(seq 1 $NUM_CIRCUITS); do
+                PLANT_ID="PLANT00$i"
+                CIRCUIT_ID="CIRCUIT0$i"
+                echo "  ✅ [SIMULATED] Registered MLTable: ${PLANT_ID}_${CIRCUIT_ID}_mltable:v1"
+              done
+              
+              # Create dummy output
+              echo "{\"circuits\": $NUM_CIRCUITS}" > mltable_result.json
+            displayName: 'Simulate MLTable Registration'
+          
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: 'mltable_result.json'
+              artifact: 'mltable_result'
+
+  # ============================================
+  # STAGE 5: SUBMIT TRAINING (SIMULATED)
+  # ============================================
+  - stage: SubmitTraining
+    displayName: '5. Submit Training (Simulated)'
+    dependsOn: RegisterMLTables
+    jobs:
+      - job: SubmitJobs
+        displayName: 'Simulate Training Job Submission'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: 'mltable_result'
+              path: $(Pipeline.Workspace)
+          
+          - script: |
+              echo "🚀 [SIMULATED] Submitting training jobs..."
+              echo ""
+              
+              NUM_CIRCUITS=${{ parameters.simulateCircuitChanges }}
+              
+              # Create dummy training jobs
+              echo "{" > training_jobs.json
+              echo "  \"submitted_jobs\": [" >> training_jobs.json
+              
+              for i in $(seq 1 $NUM_CIRCUITS); do
+                PLANT_ID="PLANT00$i"
+                CIRCUIT_ID="CIRCUIT0$i"
+                JOB_NAME="${PLANT_ID}_${CIRCUIT_ID}_training_job_$i"
+                
+                echo "  ✅ [SIMULATED] Submitted: $JOB_NAME"
+                
+                if [ $i -lt $NUM_CIRCUITS ]; then
+                  echo "    {\"job_name\": \"$JOB_NAME\", \"plant_id\": \"$PLANT_ID\", \"circuit_id\": \"$CIRCUIT_ID\", \"model_name\": \"${PLANT_ID}-model\", \"version\": \"1\", \"training_hash\": \"abc123\", \"model_type\": \"custom_model\"}," >> training_jobs.json
+                else
+                  echo "    {\"job_name\": \"$JOB_NAME\", \"plant_id\": \"$PLANT_ID\", \"circuit_id\": \"$CIRCUIT_ID\", \"model_name\": \"${PLANT_ID}-model\", \"version\": \"1\", \"training_hash\": \"abc123\", \"model_type\": \"custom_model\"}" >> training_jobs.json
+                fi
+              done
+              
+              echo "  ]," >> training_jobs.json
+              echo "  \"failed_submissions\": []" >> training_jobs.json
+              echo "}" >> training_jobs.json
+              
+              echo ""
+              echo "Submitted $NUM_CIRCUITS job(s)"
+            displayName: 'Simulate Job Submission'
+          
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: 'training_jobs.json'
+              artifact: 'training_jobs'
+
+  # ============================================
+  # STAGE 6: MONITOR TRAINING (SIMULATED)
+  # ============================================
+  - stage: MonitorTraining
+    displayName: '6. Monitor Training (Simulated)'
+    dependsOn: SubmitTraining
+    jobs:
+      - job: WaitForCompletion
+        displayName: 'Simulate Training Monitoring'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: 'training_jobs'
+              path: $(Pipeline.Workspace)
+          
+          - script: |
+              echo "⏳ [SIMULATED] Monitoring training jobs..."
+              echo ""
+              
+              NUM_FAILURES=${{ parameters.simulateJobFailures }}
+              
+              # Simulate monitoring
+              for i in {1..3}; do
+                echo "Poll $i: Jobs running..."
+                sleep 2
+              done
+              
+              echo ""
+              echo "✅ [SIMULATED] All jobs completed"
+              echo ""
+              
+              # Create monitoring result
+              NUM_CIRCUITS=${{ parameters.simulateCircuitChanges }}
+              NUM_SUCCESS=$((NUM_CIRCUITS - NUM_FAILURES))
+              
+              echo "Summary:"
+              echo "  ✅ Completed: $NUM_SUCCESS"
+              echo "  ❌ Failed: $NUM_FAILURES"
+              
+              # Create dummy output
+              echo "{\"completed\": $NUM_SUCCESS, \"failed\": $NUM_FAILURES}" > monitoring_result.json
+            displayName: 'Simulate Monitoring'
+          
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: 'monitoring_result.json'
+              artifact: 'monitoring_result'
+
+  # ============================================
+  # STAGE 7: REGISTER MODELS (SIMULATED)
+  # ============================================
+  - stage: RegisterModels
+    displayName: '7. Register Models (Simulated)'
+    dependsOn: MonitorTraining
+    jobs:
+      - job: RegisterTrainedModels
+        displayName: 'Simulate Model Registration'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: 'training_jobs'
+              path: $(Pipeline.Workspace)
+          
+          - script: |
+              echo "📊 [SIMULATED] Registering models..."
+              echo ""
+              
+              NUM_CIRCUITS=${{ parameters.simulateCircuitChanges }}
+              NUM_FAILURES=${{ parameters.simulateJobFailures }}
+              NUM_SUCCESS=$((NUM_CIRCUITS - NUM_FAILURES))
+              
+              # Create dummy registered models
+              echo "{" > registered_models.json
+              echo "  \"models\": [" >> registered_models.json
+              
+              for i in $(seq 1 $NUM_SUCCESS); do
+                PLANT_ID="PLANT00$i"
+                CIRCUIT_ID="CIRCUIT0$i"
+                MODEL_NAME="${PLANT_ID}-model"
+                
+                echo "  ✅ [SIMULATED] Registered: $MODEL_NAME:v1"
+                
+                if [ $i -lt $NUM_SUCCESS ]; then
+                  echo "    {\"model_name\": \"$MODEL_NAME\", \"version\": \"1\", \"plant_id\": \"$PLANT_ID\", \"circuit_id\": \"$CIRCUIT_ID\", \"training_hash\": \"abc123\", \"cutoff_date\": \"2024-01-15\"}," >> registered_models.json
+                else
+                  echo "    {\"model_name\": \"$MODEL_NAME\", \"version\": \"1\", \"plant_id\": \"$PLANT_ID\", \"circuit_id\": \"$CIRCUIT_ID\", \"training_hash\": \"abc123\", \"cutoff_date\": \"2024-01-15\"}" >> registered_models.json
+                fi
+              done
+              
+              echo "  ]," >> registered_models.json
+              echo "  \"failed\": []" >> registered_models.json
+              echo "}" >> registered_models.json
+              
+              echo ""
+              echo "Registered $NUM_SUCCESS model(s)"
+            displayName: 'Simulate Model Registration'
+          
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: 'registered_models.json'
+              artifact: 'registered_models'
+
+  # ============================================
+  # STAGE 8: PROMOTE TO REGISTRY (SIMULATED)
+  # ============================================
+  - stage: PromoteToRegistry
+    displayName: '8. Promote to Registry (Simulated)'
+    dependsOn: RegisterModels
+    condition: and(succeeded(), ne('${{ parameters.skipPromotion }}', 'true'))
+    jobs:
+      - job: TriggerModelPromotions
+        displayName: 'Simulate Model Promotion Triggers'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: 'registered_models'
+              path: $(Pipeline.Workspace)
+          
+          - script: |
+              echo "🚀 [SIMULATED] Triggering child pipelines for model promotions..."
+              echo ""
+              
+              cat $(Pipeline.Workspace)/registered_models.json | python3 -c "
+              import json, sys
+              data = json.load(sys.stdin)
+              models = data.get('models', [])
+              
+              print(f'Models ready for promotion: {len(models)}')
+              print()
+              
+              for model in models:
+                  print(f\"  📦 [SIMULATED] Triggered child pipeline for: {model['model_name']}:v{model['version']}\")
+                  print(f\"     Plant: {model['plant_id']}, Circuit: {model['circuit_id']}\")
+                  print(f\"     [SIMULATED] Pipeline URL: https://dev.azure.com/.../pipelines/runs/12345\")
+                  print()
+              "
+              
+              echo "✅ [SIMULATED] All child pipelines triggered"
+              echo "📌 [SIMULATED] Each model awaiting individual approval"
+            displayName: 'Simulate Child Pipeline Triggers'

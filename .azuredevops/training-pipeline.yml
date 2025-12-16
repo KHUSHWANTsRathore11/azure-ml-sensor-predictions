@@ -24,14 +24,11 @@ pr: none  # PR validation handled by pr-validation-pipeline.yml
 
 parameters:
   - name: manualCircuits
-    displayName: 'Manual Circuit Specification (Optional)'
+    displayName: 'Manual Circuit Override (leave as AUTO for git detection, or specify: PLANT001/CIRCUIT01,PLANT002/CIRCUIT02)'
     type: string
-    default: ''
-  # Format: plant1_circuit1,plant2_circuit2
-  # Example: PLANT001_CIRCUIT01,PLANT001_CIRCUIT02
-  # Leave empty to use automatic change detection
+    default: 'AUTO'  # AUTO = use automatic git-based detection
   
-  - name: skip Promotion
+  - name: skipPromotion
     displayName: 'Skip Promotion to Registry'
     type: boolean
     default: false

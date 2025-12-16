@@ -47,12 +47,12 @@ def load_circuits_to_process(
     
     Args:
         config_path: Path to circuits.yaml
-        manual_circuits: Comma-separated list (format: PLANT_CIRCUIT)
+        manual_circuits: Comma-separated list (format: PLANT_CIRCUIT) or 'AUTO'
     
     Returns:
         List of circuit configurations to process
     """
-    print("� Loading circuits to process...\n")
+    print(" Loading circuits to process...\n")
     
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
@@ -64,7 +64,8 @@ def load_circuits_to_process(
         return []
     
     # Priority 1: Manual circuit specification (explicit override)
-    if manual_circuits and manual_circuits.strip():
+    # Check for manual_circuits and ensure it's not 'AUTO' (case-insensitive)
+    if manual_circuits and manual_circuits.strip() and manual_circuits.strip().upper() != 'AUTO':
         print(f"📋 Manual circuit specification: {manual_circuits}")
         print(f"   (Overriding default)")
         manual_list = [c.strip() for c in manual_circuits.split(',')]

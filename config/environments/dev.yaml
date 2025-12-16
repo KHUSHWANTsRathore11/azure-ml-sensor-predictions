@@ -1,133 +1,133 @@
-# Development Environment Configuration
-# Branch: develop
-# Workspace: mlops-dev-workspace
-#
-# ⚠️ IMPORTANT: This file is REFERENCE DOCUMENTATION ONLY
-# The actual configuration is managed in Azure DevOps Variable Groups
-# See: docs/VARIABLE_GROUPS_SETUP.md
-#
-# ℹ️ NOTE: Dev is the ONLY environment that handles training
-# Models are promoted to Azure ML Registry, then deployed to Test/Prod
+# Dev Environment - Reference Documentation
 
-# =============================================================================
-# VARIABLE GROUPS REFERENCE (Training Pipeline)
-# =============================================================================
-# These values should be configured in Azure DevOps Library → Variable Groups
-# Group name: mlops-pipeline-settings
+⚠️ **This file is reference documentation only - not loaded by pipelines**
 
+See `docs/VARIABLE_GROUPS_REFERENCE.md` for complete setup instructions.
 
-variable_groups:
-  mlops_pipeline_settings:
-    # Python & Runtime Settings
-    pythonVersion: "3.9"
-    longRunningJobNotificationIntervalHours: 4
-    mlEngineersEmail: "ml-team@company.com"  # Update with actual email
-    
-    # Monitoring Settings
-    monitoringMaxWaitHours: 3
-    monitoringPollIntervalSeconds: 30
-    monitoringLogLevel: "DEBUG"
-    
-    # Validation Settings
-    validationMinAccuracy: 0.70
-    validationMaxMae: 10.0
-    validationMaxRmse: 15.0
-    
-    # Retention Settings
-    retentionModelsDays: 30
-    retentionLogsDays: 14
+---
 
-# =============================================================================
-# AZURE ML WORKSPACE CONFIGURATION
-# =============================================================================
-# These values are in Variable Group: mlops-dev-variables
+## Variable Groups
 
-environment:
-  name: dev
-  branch: develop
+Configure these in **Azure DevOps → Pipelines → Library**:
 
-  
-azure:
-  subscription_id: "00000000-0000-0000-0000-000000000000"  # Replace with actual subscription
-  resource_group: "mlops-dev-rg"
-  workspace_name: "mlops-dev-workspace"
-  location: "eastus"
-  
-  # Azure ML compute
-  compute:
-    training_cluster: "dev-training-cluster"
-    training_vm_size: "Standard_DS3_v2"
-    training_min_nodes: 0
-    training_max_nodes: 4
-    
-    scoring_cluster: "dev-scoring-cluster"
-    scoring_vm_size: "Standard_DS2_v2"
-    scoring_min_nodes: 0
-    scoring_max_nodes: 2
+### mlops-dev-variables
 
-  # Batch endpoints
-  batch_endpoints:
-    instance_count: 1
-    max_concurrency_per_instance: 2
-    mini_batch_size: 10
-    timeout_seconds: 300
+Azure ML Dev workspace connection:
 
-# Model training settings
-training:
-  # Retrain frequency (for dev, can be more frequent)
-  schedule: "0 2 * * *"  # Daily at 2 AM
-  
-  # Data settings
-  lookback_days: 90
-  forecast_horizon: 7
-  
-  # Model hyperparameters (dev defaults)
-  hyperparameters:
-    lstm_units: 64
-    dropout_rate: 0.2
-    learning_rate: 0.001
-    epochs: 50
-    batch_size: 32
-    early_stopping_patience: 5
+```yaml
+azureServiceConnection: "Azure-MLOps-Dev"
+subscriptionId: "12345678-1234-1234-1234-123456789012"
+resourceGroup: "mlops-dev-rg"
+workspaceName: "mlops-dev-workspace"
+location: "eastus"
+```
 
-  # Validation settings
-  validation_split: 0.2
-  test_split: 0.1
+### mlops-pipeline-settings
 
-# Model validation thresholds (relaxed for dev)
-validation:
-  min_accuracy: 0.70
-  max_mae: 10.0
-  max_rmse: 15.0
-  min_r2_score: 0.60
+Pipeline execution settings (shared across pipelines):
 
-# Deployment settings
-deployment:
-  auto_deploy: true  # Auto-deploy in dev
-  approval_required: false
-  canary_deployment: false
-  traffic_percentage: 100
+```yaml
+# Python & Runtime
+pythonVersion: "3.9"
+longRunningJobNotificationIntervalHours: 4
+mlEngineersEmail: "ml-team@company.com"
 
-# Monitoring and alerts
-monitoring:
-  enabled: true
-  log_level: "DEBUG"
-  
-  alerts:
-    enabled: false  # No alerts for dev
-    channels:
-      - slack
-    slack_webhook: "https://hooks.slack.com/services/YOUR/DEV/WEBHOOK"
+# Monitoring
+monitoringMaxWaitHours: 3
+monitoringPollIntervalSeconds: 30
+monitoringLogLevel: "DEBUG"
 
-# Data retention
-retention:
-  models: 30  # Keep models for 30 days
-  logs: 14  # Keep logs for 14 days
-  datasets: 60  # Keep datasets for 60 days
+# Validation (relaxed for dev)
+validationMinAccuracy: 0.70
+validationMaxMae: 10.0
+validationMaxRmse: 15.0
 
-# Tags
-tags:
-  environment: "dev"
-  cost_center: "ml-dev"
-  owner: "ml-team"
-  auto_shutdown: "enabled"
+# Retention
+retentionModelsDays: 30
+retentionLogsDays: 14
+```
+
+### mlops-registry-variables
+
+Azure ML Registry connection (shared across environments):
+
+```yaml
+registryName: "mlops-central-registry"
+registryResourceGroup: "mlops-registry-rg"
+
+# Model propagation settings (exponential backoff)
+registryPropagationMaxWaitSeconds: 120
+registryPropagationInitialDelaySeconds: 2
+registryPropagationMaxDelaySeconds: 30
+```
+
+---
+
+## Environment Details
+
+**Purpose:** Active development and model training
+
+**Branch:** `develop`
+
+**Pipelines:**
+- `training-pipeline.yml` - Train and register models
+- `promote-single-model-pipeline.yml` - Promote models to registry (with approval)
+
+**Approval Environment:**
+- `registry-promotion` - Approvers: ML team leads
+
+---
+
+## Azure ML Workspace Settings
+
+**Compute:**
+- Training: `Standard_DS3_v2`, 0-4 nodes
+- Scoring: `Standard_DS2_v2`, 0-2 nodes
+
+**Training Schedule:**
+- Frequency: Daily at 2 AM
+- Lookback: 90 days
+- Forecast horizon: 7 days
+
+**Model Hyperparameters (dev defaults):**
+```yaml
+lstm_units: 64
+dropout_rate: 0.2
+learning_rate: 0.001
+epochs: 50
+batch_size: 32
+early_stopping_patience: 5
+```
+
+**Validation Thresholds (relaxed):**
+```yaml
+min_accuracy: 0.70
+max_mae: 10.0
+max_rmse: 15.0
+min_r2_score: 0.60
+```
+
+**Deployment:**
+- Auto-deploy: Yes
+- Approval required: No
+- Traffic: 100%
+
+**Monitoring:**
+- Log level: DEBUG
+- Alerts: Disabled (dev only)
+
+**Retention:**
+- Models: 30 days
+- Logs: 14 days
+- Datasets: 60 days
+
+---
+
+## Tags
+
+```yaml
+environment: "dev"
+cost_center: "ml-dev"
+owner: "ml-team"
+auto_shutdown: "enabled"
+```

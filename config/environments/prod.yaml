@@ -1,238 +1,126 @@
-# Production Environment Configuration
-# Branch: main
-# Workspace: mlops-prod-workspace
-#
-# ⚠️ IMPORTANT: This file is REFERENCE DOCUMENTATION ONLY
-# The actual configuration is managed in Azure DevOps Variable Groups
-# See: docs/VARIABLE_GROUPS_SETUP.md
-#
-# ℹ️ NOTE: Production environment ONLY handles deployment from Azure ML Registry
-# Training happens in Dev, models are promoted to Registry, then deployed to Prod
+# Prod Environment - Reference Documentation
 
-# =============================================================================
-# VARIABLE GROUPS REFERENCE
-# =============================================================================
-# These values should be configured in Azure DevOps Library → Variable Groups
-# Group name: mlops-prod-variables
-#
-# Copy these values when creating the Variable Group:
+⚠️ **This file is reference documentation only - not loaded by pipelines**
 
-variable_groups:
-  mlops_prod_variables:
-    # Python & Runtime Settings (for deployment scripts)
-    pythonVersion: "3.9"
-    
-    # Deployment Settings (strict approvals)
-    deploymentApprovalRequired: true
-    deploymentApproverEmail: "ml-oncall@company.com,platform-oncall@company.com"
-    deploymentAutoRollback: true
-    
-    # Validation Settings (strictest - for deployment validation)
-    validationMinAccuracy: 0.85
-    validationMaxMae: 5.0
-    validationMaxRmse: 7.0
-    
-    # Retention Settings (compliance)
-    retentionModelsDays: 365  # 1 year
-    retentionLogsDays: 90
-    
-    # Monitoring Settings (for deployed endpoints)
-    monitoringLogLevel: "WARNING"  # Errors only
+See `docs/VARIABLE_GROUPS_REFERENCE.md` for complete setup instructions.
 
-# =============================================================================
-# AZURE ML WORKSPACE CONFIGURATION
-# =============================================================================
-# Workspace, subscription, resource group, registry settings below
+---
 
-environment:
-  name: prod
-  branch: main
+## Variable Groups
 
-  
-azure:
-  subscription_id: "00000000-0000-0000-0000-000000000000"  # Replace with actual subscription
-  resource_group: "mlops-prod-rg"
-  workspace_name: "mlops-prod-workspace"
-  location: "eastus"
-  
-  # Azure ML Registry (for shared models)
-  registry:
-    name: "mlops-model-registry"
-    resource_group: "mlops-registry-rg"
-  
-  # Azure ML compute
-  compute:
-    training_cluster: "prod-training-cluster"
-    training_vm_size: "Standard_DS5_v2"
-    training_min_nodes: 1  # Keep 1 node warm
-    training_max_nodes: 10
-    
-    scoring_cluster: "prod-scoring-cluster"
-    scoring_vm_size: "Standard_DS4_v2"
-    scoring_min_nodes: 2  # Keep 2 nodes warm for availability
-    scoring_max_nodes: 8
+Configure these in **Azure DevOps → Pipelines → Library**:
 
-  # Batch endpoints (high availability)
-  batch_endpoints:
-    instance_count: 4
-    max_concurrency_per_instance: 8
-    mini_batch_size: 50
-    timeout_seconds: 1200
-    retry_settings:
-      max_retries: 3
-      timeout_seconds: 300
+### mlops-prod-variables
 
-# Model training settings
-training:
-  # Retrain frequency (production)
-  schedule: "0 0 * * 0"  # Weekly on Sunday at midnight
-  
-  # Data settings
-  lookback_days: 365
-  forecast_horizon: 7
-  
-  # Model hyperparameters (optimized for production)
-  hyperparameters:
-    lstm_units: 256
-    dropout_rate: 0.3
-    learning_rate: 0.0001
-    epochs: 150
-    batch_size: 128
-    early_stopping_patience: 15
+Azure ML Prod workspace connection:
 
-  # Validation settings
-  validation_split: 0.2
-  test_split: 0.1
-  
-  # Cross-validation
-  cross_validation:
-    enabled: true
-    folds: 5
+```yaml
+azureServiceConnection: "Azure-MLOps-Prod"
+subscriptionId: "12345678-1234-1234-1234-123456789012"
+resourceGroup: "mlops-prod-rg"
+workspaceName: "mlops-prod-workspace"
+location: "eastus"
+```
 
-# Model validation thresholds (strict for production)
-validation:
-  min_accuracy: 0.85
-  max_mae: 5.0
-  max_rmse: 7.0
-  min_r2_score: 0.80
-  
-  # Business metrics
-  business_metrics:
-    min_precision: 0.85
-    min_recall: 0.80
-    max_false_positive_rate: 0.10
+### mlops-registry-variables
 
-# Deployment settings
-deployment:
-  auto_deploy: false  # Never auto-deploy to production
-  approval_required: true
-  approvers:
-    - "senior-ml-engineer@company.com"
-    - "platform-lead@company.com"
-  
-  # Blue-green deployment
-  blue_green_deployment: true
-  traffic_percentage: 0  # Start with 0%, gradually increase
-  traffic_ramp_up:
-    - step: 1
-      percentage: 10
-      duration_minutes: 30
-    - step: 2
-      percentage: 25
-      duration_minutes: 30
-    - step: 3
-      percentage: 50
-      duration_minutes: 60
-    - step: 4
-      percentage: 100
-      duration_minutes: 0
-  
-  # Rollback settings
-  auto_rollback:
-    enabled: true
-    error_threshold_percent: 5
-    latency_threshold_ms: 2000
+Azure ML Registry connection (shared across environments):
 
-# Monitoring and alerts
-monitoring:
-  enabled: true
-  log_level: "WARNING"  # Only warnings and errors in prod
-  
-  # Application Insights
-  application_insights:
-    enabled: true
-    sampling_rate: 0.1  # Sample 10% of requests
-  
-  alerts:
-    enabled: true
-    priority: "high"
-    channels:
-      - pagerduty
-      - email
-      - slack
-    pagerduty_integration_key: "YOUR_PAGERDUTY_KEY"
-    email_recipients:
-      - "ml-oncall@company.com"
-      - "platform-oncall@company.com"
-    slack_webhook: "https://hooks.slack.com/services/YOUR/PROD/WEBHOOK"
-  
-  # Alert thresholds (strict)
-  alert_thresholds:
-    model_drift: 0.10
-    data_drift: 0.15
-    prediction_latency_ms: 500
-    error_rate_percent: 2
-    endpoint_availability_percent: 99.5
-  
-  # Dashboards
-  dashboards:
-    - name: "Model Performance"
-      url: "https://portal.azure.com/..."
-    - name: "System Health"
-      url: "https://portal.azure.com/..."
+```yaml
+registryName: "mlops-central-registry"
+registryResourceGroup: "mlops-registry-rg"
 
-# Data retention (compliance)
-retention:
-  models: 365  # Keep all models for 1 year
-  logs: 90  # Keep logs for 90 days
-  datasets: 730  # Keep datasets for 2 years
-  predictions: 180  # Keep predictions for 180 days
+# Model propagation settings (exponential backoff)
+registryPropagationMaxWaitSeconds: 120
+registryPropagationInitialDelaySeconds: 2
+registryPropagationMaxDelaySeconds: 30
+```
 
-# Backup and disaster recovery
-backup:
-  enabled: true
-  frequency: "daily"
-  retention_days: 30
-  geo_redundant: true
+---
 
-# Security
-security:
-  vnet_enabled: true
-  private_endpoints: true
-  managed_identity: true
-  key_vault: "mlops-prod-keyvault"
-  
-  # Access control
-  rbac:
-    - role: "Contributor"
-      principals:
-        - "ml-team-prod@company.com"
-    - role: "Reader"
-      principals:
-        - "data-science-team@company.com"
+## Environment Details
 
-# Cost management
-cost_management:
-  budget_alert_threshold_usd: 5000
-  auto_shutdown:
-    idle_time_minutes: 30
-    schedule: "0 20 * * *"  # Shutdown non-critical at 8 PM
+**Purpose:** Production model serving
 
-# Tags
-tags:
-  environment: "prod"
-  cost_center: "ml-production"
-  owner: "ml-platform-team"
-  criticality: "high"
-  compliance: "required"
-  auto_shutdown: "disabled"
+**Branch:** `main`
+
+**Pipelines:**
+- `prod-deployment-pipeline.yml` - Deploy models from registry
+
+**Approval Environment:**
+- `prod-deployment` - Approvers: Senior engineers + platform lead
+
+**Note:** Prod environment does NOT train models - only deploys from Registry
+
+---
+
+## Azure ML Workspace Settings
+
+**Compute:**
+- Scoring: `Standard_DS4_v2`, 2-8 nodes (2 warm for HA)
+
+**Deployment:**
+- Auto-deploy: No (never auto-deploy to prod)
+- Approval required: Yes (2 approvers)
+- Blue-green deployment: Yes
+- Traffic ramp: 0% → 10% → 25% → 50% → 100%
+
+**Monitoring:**
+- Log level: WARNING (errors only)
+- Alerts: Enabled (PagerDuty + email + Slack)
+- Application Insights: Enabled (10% sampling)
+
+**Validation Thresholds (strictest):**
+```yaml
+min_accuracy: 0.85
+max_mae: 5.0
+max_rmse: 7.0
+min_r2_score: 0.80
+min_precision: 0.85
+min_recall: 0.80
+max_false_positive_rate: 0.10
+```
+
+**Alert Thresholds (strict):**
+```yaml
+model_drift: 0.10
+data_drift: 0.15
+prediction_latency_ms: 500
+error_rate_percent: 2
+endpoint_availability_percent: 99.5
+```
+
+**Auto-Rollback:**
+- Enabled: Yes
+- Error threshold: 5%
+- Latency threshold: 2000ms
+
+**Retention:**
+- Models: 365 days (1 year)
+- Logs: 90 days
+- Datasets: 730 days (2 years)
+- Predictions: 180 days
+
+**Backup:**
+- Frequency: Daily
+- Retention: 30 days
+- Geo-redundant: Yes
+
+**Security:**
+- VNet: Enabled
+- Private endpoints: Yes
+- Managed identity: Yes
+- Key vault: `mlops-prod-keyvault`
+
+---
+
+## Tags
+
+```yaml
+environment: "prod"
+cost_center: "ml-production"
+owner: "ml-platform-team"
+criticality: "high"
+compliance: "required"
+auto_shutdown: "disabled"
+```

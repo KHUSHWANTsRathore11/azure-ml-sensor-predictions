@@ -1,145 +1,102 @@
-# Test Environment Configuration
-# Branch: release/*
-# Workspace: mlops-test-workspace
-#
-# ⚠️ IMPORTANT: This file is REFERENCE DOCUMENTATION ONLY
-# The actual configuration is managed in Azure DevOps Variable Groups
-# See: docs/VARIABLE_GROUPS_SETUP.md
-#
-# ℹ️ NOTE: Test environment ONLY handles deployment from Azure ML Registry
-# Training happens in Dev, models are promoted to Registry, then deployed to Test
+# Test Environment - Reference Documentation
 
-# =============================================================================
-# VARIABLE GROUPS REFERENCE
-# =============================================================================
-# These values should be configured in Azure DevOps Library → Variable Groups
-# Group name: mlops-test-variables
-#
-# Copy these values when creating the Variable Group:
+⚠️ **This file is reference documentation only - not loaded by pipelines**
 
-variable_groups:
-  mlops_test_variables:
-    # Python & Runtime Settings (for deployment scripts)
-    pythonVersion: "3.9"
-    
-    # Deployment Settings
-    deploymentApprovalRequired: true
-    deploymentApproverEmail: "qa-team@company.com"
-    
-    # Validation Settings (for deployment validation)
-    validationMinAccuracy: 0.80
-    validationMaxMae: 7.0
-    validationMaxRmse: 10.0
-    
-    # Retention Settings
-    retentionModelsDays: 90
-    retentionLogsDays: 30
-    
-    # Monitoring Settings (for deployed endpoints)
-    monitoringLogLevel: "INFO"
+See `docs/VARIABLE_GROUPS_REFERENCE.md` for complete setup instructions.
 
-# =============================================================================
-# AZURE ML WORKSPACE CONFIGURATION
-# =============================================================================
-# Workspace, subscription, resource group settings below
+---
 
-environment:
-  name: test
-  branch: release/*
+## Variable Groups
 
-  
-azure:
-  subscription_id: "00000000-0000-0000-0000-000000000000"  # Replace with actual subscription
-  resource_group: "mlops-test-rg"
-  workspace_name: "mlops-test-workspace"
-  location: "eastus"
-  
-  # Azure ML compute
-  compute:
-    training_cluster: "test-training-cluster"
-    training_vm_size: "Standard_DS4_v2"
-    training_min_nodes: 0
-    training_max_nodes: 6
-    
-    scoring_cluster: "test-scoring-cluster"
-    scoring_vm_size: "Standard_DS3_v2"
-    scoring_min_nodes: 0
-    scoring_max_nodes: 4
+Configure these in **Azure DevOps → Pipelines → Library**:
 
-  # Batch endpoints
-  batch_endpoints:
-    instance_count: 2
-    max_concurrency_per_instance: 4
-    mini_batch_size: 20
-    timeout_seconds: 600
+### mlops-test-variables
 
-# Model training settings
-training:
-  # Retrain frequency (test mimics production)
-  schedule: "0 1 * * 0"  # Weekly on Sunday at 1 AM
-  
-  # Data settings
-  lookback_days: 180
-  forecast_horizon: 7
-  
-  # Model hyperparameters (production-like)
-  hyperparameters:
-    lstm_units: 128
-    dropout_rate: 0.3
-    learning_rate: 0.0005
-    epochs: 100
-    batch_size: 64
-    early_stopping_patience: 10
+Azure ML Test workspace connection:
 
-  # Validation settings
-  validation_split: 0.2
-  test_split: 0.1
+```yaml
+azureServiceConnection: "Azure-MLOps-Test"
+subscriptionId: "12345678-1234-1234-1234-123456789012"
+resourceGroup: "mlops-test-rg"
+workspaceName: "mlops-test-workspace"
+location: "eastus"
+```
 
-# Model validation thresholds (stricter for test)
-validation:
-  min_accuracy: 0.80
-  max_mae: 7.0
-  max_rmse: 10.0
-  min_r2_score: 0.75
+### mlops-registry-variables
 
-# Deployment settings
-deployment:
-  auto_deploy: false  # Manual approval for test
-  approval_required: true
-  canary_deployment: true
-  traffic_percentage: 50  # Canary with 50% traffic
+Azure ML Registry connection (shared across environments):
 
-# Monitoring and alerts
-monitoring:
-  enabled: true
-  log_level: "INFO"
-  
-  alerts:
-    enabled: true
-    channels:
-      - email
-      - slack
-    email_recipients:
-      - "qa-team@company.com"
-      - "ml-team@company.com"
-    slack_webhook: "https://hooks.slack.com/services/YOUR/TEST/WEBHOOK"
-  
-  # Alert thresholds
-  alert_thresholds:
-    model_drift: 0.15
-    data_drift: 0.20
-    prediction_latency_ms: 1000
-    error_rate_percent: 5
+```yaml
+registryName: "mlops-central-registry"
+registryResourceGroup: "mlops-registry-rg"
 
-# Data retention
-retention:
-  models: 90  # Keep models for 90 days
-  logs: 30  # Keep logs for 30 days
-  datasets: 180  # Keep datasets for 180 days
+# Model propagation settings (exponential backoff)
+registryPropagationMaxWaitSeconds: 120
+registryPropagationInitialDelaySeconds: 2
+registryPropagationMaxDelaySeconds: 30
+```
 
-# Tags
-tags:
-  environment: "test"
-  cost_center: "ml-test"
-  owner: "qa-team"
-  auto_shutdown: "enabled"
+---
+
+## Environment Details
+
+**Purpose:** QA validation and pre-production testing
+
+**Branch:** `release/*`
+
+**Pipelines:**
+- `test-deployment-pipeline.yml` - Deploy models from registry
+
+**Approval Environment:**
+- `test-deployment` - Approvers: QA team
+
+**Note:** Test environment does NOT train models - only deploys from Registry
+
+---
+
+## Azure ML Workspace Settings
+
+**Compute:**
+- Scoring: `Standard_DS3_v2`, 0-4 nodes
+
+**Deployment:**
+- Auto-deploy: No
+- Approval required: Yes
+- Canary deployment: Yes (50% traffic)
+
+**Monitoring:**
+- Log level: INFO
+- Alerts: Enabled (email + Slack)
+- Alert channels: QA team, ML team
+
+**Validation Thresholds (stricter):**
+```yaml
+min_accuracy: 0.80
+max_mae: 7.0
+max_rmse: 10.0
+min_r2_score: 0.75
+```
+
+**Alert Thresholds:**
+```yaml
+model_drift: 0.15
+data_drift: 0.20
+prediction_latency_ms: 1000
+error_rate_percent: 5
+```
+
+**Retention:**
+- Models: 90 days
+- Logs: 30 days
+- Datasets: 180 days
+
+---
+
+## Tags
+
+```yaml
+environment: "test"
+cost_center: "ml-test"
+owner: "qa-team"
+auto_shutdown: "enabled"
+```

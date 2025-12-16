@@ -84,21 +84,24 @@ stages:
                 ENV_NAME=$(grep "^name:" config/environment.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
                 echo "Environment: $ENV_NAME:$CONFIG_VERSION"
                 
+                # Check if environment already exists
                 EXISTING_ENV=$(az ml environment show \
                   --name "$ENV_NAME" \
                   --version "$CONFIG_VERSION" 2>/dev/null || echo "not_found")
                 
                 if [[ "$EXISTING_ENV" == "not_found" ]]; then
                   echo "Version $CONFIG_VERSION not found. Registering new environment..."
-                  az ml environment create --file config/environment.yaml
-                  echo "✅ Environment registered: $ENV_NAME:$CONFIG_VERSION"
                   
-                  # Set output variable to indicate new registration
+                  # Register environment - will fail if file is invalid or missing
+                  if ! az ml environment create --file config/environment.yaml; then
+                    echo "❌ Failed to register environment"
+                    exit 1
+                  fi
+                  
+                  echo "✅ Environment registered: $ENV_NAME:$CONFIG_VERSION"
                   echo "##vso[task.setvariable variable=newEnvRegistered;isOutput=true]true"
                 else
                   echo "✅ Environment $ENV_NAME:$CONFIG_VERSION already exists. Skipping registration."
-                  
-                  # Set output variable to indicate no new registration
                   echo "##vso[task.setvariable variable=newEnvRegistered;isOutput=true]false"
                 fi
 
@@ -222,26 +225,30 @@ stages:
                 echo "📦 Registering pipeline component..."
                 
                 PIPELINE_COMP_FILE="components/training-pipeline-component.yaml"
+                
+                # Extract component name and version from the component file
                 COMP_NAME=$(grep "^name:" "$PIPELINE_COMP_FILE" | awk '{print $2}' | tr -d '"' | tr -d "'")
                 COMP_VERSION=$(grep "^version:" "$PIPELINE_COMP_FILE" | awk '{print $2}' | tr -d '"' | tr -d "'")
                 
-                echo "Checking pipeline component: $COMP_NAME:$COMP_VERSION"
+                echo "Component: $COMP_NAME:$COMP_VERSION"
                 
+                # Check if this version already exists
                 EXISTING_COMP=$(az ml component show \
                   --name "$COMP_NAME" \
                   --version "$COMP_VERSION" 2>/dev/null || echo "not_found")
                 
                 if [[ "$EXISTING_COMP" == "not_found" ]]; then
-                  echo "Version $COMP_VERSION not found. Registering..."
+                  echo "Version $COMP_VERSION not found. Registering component..."
                   
-                  if az ml component create --file "$PIPELINE_COMP_FILE"; then
-                    echo "✅ Registered pipeline component: $COMP_NAME:$COMP_VERSION"
-                  else
-                    echo "❌ Failed to register pipeline component"
+                  # Register component - version comes from the component file
+                  if ! az ml component create --file "$PIPELINE_COMP_FILE"; then
+                    echo "❌ Failed to register component"
                     exit 1
                   fi
+                  
+                  echo "✅ Component registered: $COMP_NAME:$COMP_VERSION"
                 else
-                  echo "✅ Pipeline component $COMP_NAME:$COMP_VERSION already exists. Skipping."
+                  echo "✅ Component $COMP_NAME:$COMP_VERSION already exists. Skipping registration."
                 fi
 
   # ============================================

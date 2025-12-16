@@ -7,6 +7,9 @@ circuits:
     circuit_id: "CIRCUIT01"
     model_name: "plant001-circuit01"
     description: "Primary cooling system"
+    # Pipeline component version to use for training
+    # This version is included in the training hash for model lineage
+    pipeline_component_version: "1.0.0"
     features:
       - temperature
       - pressure
@@ -23,12 +26,12 @@ circuits:
       learning_rate: 0.001
       epochs: 50
       batch_size: 32
-    environment_version: "1.0.0"
     
   - plant_id: "PLANT001"
     circuit_id: "CIRCUIT02"
     model_name: "plant001-circuit02"
     description: "Hydraulic press system"
+    pipeline_component_version: "1.0.0"
     features:
       - temperature
       - pressure
@@ -45,12 +48,12 @@ circuits:
       learning_rate: 0.001
       epochs: 50
       batch_size: 32
-    environment_version: "1.0.0"
 
   - plant_id: "PLANT001"
     circuit_id: "CIRCUIT03"
     model_name: "plant001-circuit03"
     description: "Conveyor belt motor"
+    pipeline_component_version: "1.0.0"
     features:
       - temperature
       - pressure
@@ -67,13 +70,13 @@ circuits:
       learning_rate: 0.001
       epochs: 50
       batch_size: 32
-    environment_version: "1.0.0"
 
   # Plant 2 - Manufacturing Facility West
   - plant_id: "PLANT002"
     circuit_id: "CIRCUIT01"
     model_name: "plant002-circuit01"
     description: "Main compressor unit"
+    pipeline_component_version: "1.0.0"
     features:
       - temperature
       - pressure
@@ -90,12 +93,12 @@ circuits:
       learning_rate: 0.001
       epochs: 50
       batch_size: 32
-    environment_version: "1.0.0"
 
   - plant_id: "PLANT002"
     circuit_id: "CIRCUIT02"
     model_name: "plant002-circuit02"
     description: "Cooling tower system"
+    pipeline_component_version: "1.0.0"
     features:
       - temperature
       - pressure
@@ -112,7 +115,6 @@ circuits:
       learning_rate: 0.001
       epochs: 50
       batch_size: 32
-    environment_version: "1.0.0"
 
 # Add more circuits as needed (up to 75-200 circuits)
 # Template for additional circuits:
@@ -130,4 +132,3 @@ circuits:
 #      learning_rate: 0.001
 #      epochs: 50
 #      batch_size: 32
-#    environment_version: "1.0.0"

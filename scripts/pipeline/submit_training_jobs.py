@@ -23,27 +23,34 @@ from datetime import datetime, timedelta, timezone
 
 def calculate_training_hash(circuit_cfg: dict) -> str:
     """
-    Calculate training hash from all parameters that affect training.
+    Calculate a hash of the circuit configuration.
+    
+    This hash represents the training configuration and is used to:
+    1. Detect if retraining is needed (config changed)
+    2. Tag models for lineage tracking
+    3. Enable reproducibility
     
     Includes:
-    - Features (data columns)
-    - Cutoff date (data filtering)
-    - Delta version (data snapshot)
-    - Environment version (code/dependencies)
-    - Hyperparameters (model config)
+    - cutoff_date: Data cutoff for training
+    - delta_version: Delta Lake version for reproducibility
+    - pipeline_component_version: Pipeline component version used for training
+    - training_days: Lookback period
+    - hyperparameters: Model hyperparameters
+    
+    NOTE: environment_version is NOT included - it's only for environment registration.
+    Environment changes don't trigger retraining.
     """
-    features = circuit_cfg.get('features', [])
-    feature_str = ','.join(sorted(features))
+    hash_components = {
+        'cutoff_date': circuit_cfg.get('cutoff_date'),
+        'delta_version': circuit_cfg.get('delta_version'),
+        'pipeline_component_version': circuit_cfg.get('pipeline_component_version', '1.0.0'),
+        'training_days': circuit_cfg.get('training_days'),
+        'hyperparameters': circuit_cfg.get('hyperparameters', {}),
+    }
     
-    cutoff_date = circuit_cfg.get('cutoff_date', '')
-    delta_version = circuit_cfg.get('delta_version', 0)
-    environment_version = circuit_cfg.get('environment_version', '1.0.0')
-    
-    hyperparams = circuit_cfg.get('hyperparameters', {})
-    hyperparam_str = ','.join(f"{k}={v}" for k, v in sorted(hyperparams.items()))
-    
-    hash_str = f"{feature_str}|{cutoff_date}|{delta_version}|{environment_version}|{hyperparam_str}"
-    return hashlib.md5(hash_str.encode()).hexdigest()[:8]
+    # Create deterministic string representation
+    hash_str = json.dumps(hash_components, sort_keys=True)
+    return hashlib.md5(hash_str.encode()).hexdigest()[:12]
 
 
 def get_last_model_training_hash(

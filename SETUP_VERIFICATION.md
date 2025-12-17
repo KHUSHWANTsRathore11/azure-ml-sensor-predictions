@@ -4,7 +4,7 @@
 
 ### Configuration Files (3)
 - [x] `config/circuits.yaml` (3.0K) - 5 sample circuits defined
-- [x] `config/environment.yaml` (785B) - TensorFlow 2.13 environment
+- [x] `components/environments/sensor-forecasting-env.yaml` (785B) - TensorFlow 2.13 environment
 - [x] `config/MLTable` (460B) - Delta Lake MLTable definition
 
 ### Python Scripts (7)

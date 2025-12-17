@@ -75,7 +75,7 @@ New to the project? Start here:
 ## Common Tasks
 
 ### Update Environment Packages
-1. Edit `config/environment.yaml` (bump version)
+1. Edit `components/environments/sensor-forecasting-env.yaml` (bump version)
 2. Run training pipeline
 3. Approve environment promotion
 4. No retraining triggered

@@ -17,7 +17,7 @@ echo ""
 # Environment
 echo "🐍 Environment Operations:"
 echo "   Register environment:"
-echo "   az ml environment create --file config/environment.yaml --workspace-name <ws> --resource-group <rg>"
+echo "   az ml environment create --file components/environments/sensor-forecasting-env.yaml --workspace-name <ws> --resource-group <rg>"
 echo ""
 echo "   List environments:"
 echo "   az ml environment list --workspace-name <ws> --resource-group <rg> -o table"

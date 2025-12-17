@@ -25,7 +25,7 @@ Complete guide to the Azure ML training and deployment pipelines.
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ Stage 1: RegisterEnvironment                                    │
-│ - Check config/environment.yaml version                         │
+│ - Check components/environments/sensor-forecasting-env.yaml version                         │
 │ - Register if new version                                       │
 │ - Output: newEnvRegistered (true/false)                         │
 └──────────────────────────────┬──────────────────────────────────┘
@@ -97,14 +97,14 @@ Complete guide to the Azure ML training and deployment pipelines.
 
 **Logic:**
 ```bash
-# Read version from config/environment.yaml
-ENV_NAME=$(grep "^name:" config/environment.yaml | awk '{print $2}')
-ENV_VERSION=$(grep "^version:" config/environment.yaml | awk '{print $2}')
+# Read version from components/environments/sensor-forecasting-env.yaml
+ENV_NAME=$(grep "^name:" components/environments/sensor-forecasting-env.yaml | awk '{print $2}')
+ENV_VERSION=$(grep "^version:" components/environments/sensor-forecasting-env.yaml | awk '{print $2}')
 
 # Check if exists
 if ! az ml environment show --name "$ENV_NAME" --version "$ENV_VERSION"; then
   # Register new version
-  az ml environment create --file config/environment.yaml
+  az ml environment create --file components/environments/sensor-forecasting-env.yaml
   echo "##vso[task.setvariable variable=newEnvRegistered;isOutput=true]true"
 else
   echo "##vso[task.setvariable variable=newEnvRegistered;isOutput=true]false"
@@ -125,7 +125,7 @@ fi
 ```bash
 # Promote to registry
 az ml environment create \
-  --file config/environment.yaml \
+  --file components/environments/sensor-forecasting-env.yaml \
   --registry-name "$(registryName)" \
   --resource-group "$(registryResourceGroup)"
 ```
@@ -340,7 +340,7 @@ az pipelines run --name "rollback-pipeline"
 
 ## Best Practices
 
-1. **Environment Changes** - Bump version in `config/environment.yaml`
+1. **Environment Changes** - Bump version in `components/environments/sensor-forecasting-env.yaml`
 2. **Component Changes** - Bump version in `components/training-pipeline-component.yaml`
 3. **Circuit Changes** - Update `config/circuits.yaml` (triggers retraining)
 4. **Manual Training** - Use `manualCircuits` parameter

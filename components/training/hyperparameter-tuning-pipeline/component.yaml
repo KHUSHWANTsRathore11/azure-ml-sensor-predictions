@@ -1,0 +1,108 @@
+$schema: https://azuremlschemas.azureedge.net/latest/pipelineComponent.schema.json
+type: pipeline
+
+name: sensor_hyperparameter_tuning_pipeline
+display_name: Sensor Hyperparameter Tuning Pipeline
+version: 1.0.0
+description: |
+  Hyperparameter tuning pipeline for sensor circuit LSTM models.
+  Wraps the existing train-lstm-model component in a sweep job.
+  
+  Usage: Data scientists use this for exploratory hyperparameter optimization.
+  Results are manually applied to circuits.yaml after identifying best parameters.
+
+tags:
+  pipeline_type: hyperparameter_tuning
+  model_type: lstm
+  use_case: sensor_forecasting
+  experiment: true
+
+inputs:
+  circuit_config:
+    type: uri_file
+    description: Circuit-specific configuration YAML
+  training_data:
+    type: mltable
+    description: Pre-registered MLTable data asset (circuit-specific version)
+  max_trials:
+    type: integer
+    default: 20
+    description: Maximum number of hyperparameter combinations to try
+  sampling_algorithm:
+    type: string
+    default: random
+    description: Sampling algorithm (random or bayesian)
+    enum:
+      - random
+      - bayesian
+
+outputs:
+  best_model:
+    type: mlflow_model
+    description: Best model from hyperparameter tuning
+  tuning_metrics:
+    type: uri_file
+    description: Metrics from all trials
+
+jobs:
+  hyperparameter_sweep:
+    type: sweep
+    
+    # Sampling strategy
+    sampling_algorithm: ${{parent.inputs.sampling_algorithm}}
+    
+    # Search space for hyperparameters
+    # These will be passed to the training script via MLflow
+    search_space:
+      lstm_units:
+        type: choice
+        values: [32, 64, 128, 256]
+      learning_rate:
+        type: loguniform
+        min_value: 0.0001
+        max_value: 0.01
+      epochs:
+        type: choice
+        values: [30, 50, 100]
+      batch_size:
+        type: choice
+        values: [16, 32, 64]
+    
+    # Objective metric to optimize
+    objective:
+      primary_metric: val_loss
+      goal: minimize
+    
+    # Limits
+    limits:
+      max_total_trials: ${{parent.inputs.max_trials}}
+      max_concurrent_trials: 3
+      timeout: 43200  # 12 hours max
+    
+    # Early termination policy
+    early_termination:
+      type: bandit
+      evaluation_interval: 5
+      slack_factor: 0.1
+      delay_evaluation: 10
+    
+    # Trial component - each trial runs the training component
+    trial:
+      type: command
+      component: file:../train-lstm-model/component.yaml
+      
+      # Map parent inputs to trial
+      inputs:
+        circuit_config: ${{parent.inputs.circuit_config}}
+        training_data: ${{parent.inputs.training_data}}
+      
+      # Map trial outputs to parent outputs
+      outputs:
+        trained_model: ${{parent.outputs.best_model}}
+        metrics: ${{parent.outputs.tuning_metrics}}
+
+settings:
+  default_compute: azureml:cpu-cluster
+  default_datastore: azureml:workspaceblobstore
+  continue_on_step_failure: false
+

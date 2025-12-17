@@ -31,7 +31,7 @@ jobs:
   # Single job: Train LSTM model for one circuit
   train:
     type: command
-    component: file:./train-lstm-model/component.yaml  # Local component file
+    component: file:../training/train-lstm-model/component.yaml  # Local component file
     inputs:
       circuit_config: ${{parent.inputs.circuit_config}}
       training_data: ${{parent.inputs.training_data}}

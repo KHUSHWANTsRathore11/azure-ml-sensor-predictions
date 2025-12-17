@@ -15,7 +15,7 @@ trigger:
   paths:
     include:
       - config/circuits.yaml
-      - config/environment.yaml
+      - components/environments/sensor-forecasting-env.yaml
       - components/**
       - src/packages/**
       - scripts/**
@@ -80,8 +80,8 @@ stages:
               inlineScript: |
                 echo "🐳 Checking environment in Dev workspace..."
                 
-                CONFIG_VERSION=$(grep "^version:" config/environment.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
-                ENV_NAME=$(grep "^name:" config/environment.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                CONFIG_VERSION=$(grep "^version:" components/environments/sensor-forecasting-env.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                ENV_NAME=$(grep "^name:" components/environments/sensor-forecasting-env.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
                 echo "Environment: $ENV_NAME:$CONFIG_VERSION"
                 
                 # Check if environment already exists
@@ -93,7 +93,7 @@ stages:
                   echo "Version $CONFIG_VERSION not found. Registering new environment..."
                   
                   # Register environment - will fail if file is invalid or missing
-                  if ! az ml environment create --file config/environment.yaml; then
+                  if ! az ml environment create --file components/environments/sensor-forecasting-env.yaml; then
                     echo "❌ Failed to register environment"
                     exit 1
                   fi
@@ -131,8 +131,8 @@ stages:
                     echo "╚════════════════════════════════════════════════════════════╝"
                     echo ""
                     
-                    CONFIG_VERSION=$(grep "^version:" config/environment.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
-                    ENV_NAME=$(grep "^name:" config/environment.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                    CONFIG_VERSION=$(grep "^version:" components/environments/sensor-forecasting-env.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                    ENV_NAME=$(grep "^name:" components/environments/sensor-forecasting-env.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
                     
                     echo "Environment: $ENV_NAME"
                     echo "Version:     $CONFIG_VERSION"
@@ -157,8 +157,8 @@ stages:
                     inlineScript: |
                       echo "🚀 Promoting environment to registry..."
                       
-                      CONFIG_VERSION=$(grep "^version:" config/environment.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
-                      ENV_NAME=$(grep "^name:" config/environment.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                      CONFIG_VERSION=$(grep "^version:" components/environments/sensor-forecasting-env.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                      ENV_NAME=$(grep "^name:" components/environments/sensor-forecasting-env.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
                       
                       echo "Environment: $ENV_NAME:$CONFIG_VERSION"
                       
@@ -175,7 +175,7 @@ stages:
                       # Promote to registry
                       echo "Promoting $ENV_NAME:$CONFIG_VERSION to registry..."
                       az ml environment create \
-                        --file config/environment.yaml \
+                        --file components/environments/sensor-forecasting-env.yaml \
                         --registry-name "$(registryName)" \
                         --resource-group "$(registryResourceGroup)"
                       
@@ -205,8 +205,8 @@ stages:
     displayName: '3. Register Components'
     dependsOn: RegisterEnvironment
     jobs:
-      - job: RegisterPipelineComponent
-        displayName: 'Register Pipeline Component'
+      - job: RegisterAllComponents
+        displayName: 'Register All Components'
         pool:
           vmImage: 'ubuntu-latest'
         steps:
@@ -216,40 +216,51 @@ stages:
           - template: templates/configure-ml-defaults.yml
           
           - task: AzureCLI@2
-            displayName: 'Register Pipeline Component'
+            displayName: 'Register All Components'
             inputs:
               azureSubscription: '$(azureServiceConnection)'
               scriptType: 'bash'
               scriptLocation: 'inlineScript'
               inlineScript: |
-                echo "📦 Registering pipeline component..."
+                echo "📦 Registering all components..."
+                echo ""
                 
-                PIPELINE_COMP_FILE="components/training-pipeline-component.yaml"
-                
-                # Extract component name and version from the component file
-                COMP_NAME=$(grep "^name:" "$PIPELINE_COMP_FILE" | awk '{print $2}' | tr -d '"' | tr -d "'")
-                COMP_VERSION=$(grep "^version:" "$PIPELINE_COMP_FILE" | awk '{print $2}' | tr -d '"' | tr -d "'")
-                
-                echo "Component: $COMP_NAME:$COMP_VERSION"
-                
-                # Check if this version already exists
-                EXISTING_COMP=$(az ml component show \
-                  --name "$COMP_NAME" \
-                  --version "$COMP_VERSION" 2>/dev/null || echo "not_found")
-                
-                if [[ "$EXISTING_COMP" == "not_found" ]]; then
-                  echo "Version $COMP_VERSION not found. Registering component..."
+                # Function to register a component
+                register_component() {
+                  local component_file=$1
+                  local component_name=$(grep "^name:" "$component_file" | awk '{print $2}' | tr -d '"' | tr -d "'")
+                  local component_version=$(grep "^version:" "$component_file" | awk '{print $2}' | tr -d '"' | tr -d "'")
                   
-                  # Register component - version comes from the component file
-                  if ! az ml component create --file "$PIPELINE_COMP_FILE"; then
-                    echo "❌ Failed to register component"
-                    exit 1
+                  echo "Checking: $component_name:$component_version"
+                  
+                  # Check if this version already exists
+                  if az ml component show --name "$component_name" --version "$component_version" &>/dev/null; then
+                    echo "  ✅ Already exists, skipping"
+                  else
+                    echo "  📦 Registering..."
+                    if az ml component create --file "$component_file"; then
+                      echo "  ✅ Registered successfully"
+                    else
+                      echo "  ❌ Registration failed"
+                      exit 1
+                    fi
                   fi
-                  
-                  echo "✅ Component registered: $COMP_NAME:$COMP_VERSION"
-                else
-                  echo "✅ Component $COMP_NAME:$COMP_VERSION already exists. Skipping registration."
-                fi
+                  echo ""
+                }
+                
+                # Register pipeline components
+                echo "═══════════════════════════════════════════════════════════"
+                echo "📋 PIPELINE COMPONENTS"
+                echo "═══════════════════════════════════════════════════════════"
+                for component_file in components/pipelines/*.yaml; do
+                  if [ -f "$component_file" ]; then
+                    register_component "$component_file"
+                  fi
+                done
+                
+                echo "═══════════════════════════════════════════════════════════"
+                echo "✅ Component registration complete!"
+                echo "═══════════════════════════════════════════════════════════"
 
   # ============================================
   # STAGE 4: REGISTER MLTABLES

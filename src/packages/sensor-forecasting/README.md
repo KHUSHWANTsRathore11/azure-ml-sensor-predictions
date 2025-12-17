@@ -28,7 +28,7 @@ __version__ = "1.0.0"
 ```
 
 ```yaml
-# config/environment.yaml
+# components/environments/sensor-forecasting-env.yaml
 name: sensor-forecasting-env
 version: "1.0.0"
 tags:
@@ -45,7 +45,7 @@ tags:
 
 2. Update environment version:
    ```yaml
-   # config/environment.yaml
+   # components/environments/sensor-forecasting-env.yaml
    name: sensor-forecasting-env
    version: "1.1.0"
    tags:
@@ -55,7 +55,7 @@ tags:
 3. Commit both files together:
    ```bash
    git add src/packages/sensor-forecasting/version.py
-   git add config/environment.yaml
+   git add components/environments/sensor-forecasting-env.yaml
    git commit -m "bump: sensor-forecasting to v1.1.0"
    ```
 

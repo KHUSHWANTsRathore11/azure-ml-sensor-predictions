@@ -4,7 +4,7 @@
 # 1. Reads package version from packages/sensor-forecasting/version.py
 # 2. Builds Docker image with that version
 # 3. Pushes to Azure Container Registry
-# 4. Updates config/environment.yaml with image reference
+# 4. Updates components/environments/sensor-forecasting-env.yaml with image reference
 
 set -e
 
@@ -76,10 +76,10 @@ echo -e "${GREEN}✅ Pushed: $IMAGE_TAG_LATEST${NC}"
 
 # Step 5: Update environment.yaml
 echo ""
-echo "📝 Updating config/environment.yaml..."
+echo "📝 Updating components/environments/sensor-forecasting-env.yaml..."
 
 # Create updated environment.yaml
-cat > config/environment.yaml << EOF
+cat > components/environments/sensor-forecasting-env.yaml << EOF
 \$schema: https://azuremlschemas.azureedge.net/latest/environment.schema.json
 name: sensor-forecasting-env
 version: "$PACKAGE_VERSION"
@@ -98,7 +98,7 @@ tags:
   built_at: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 EOF
 
-echo -e "${GREEN}✅ Updated config/environment.yaml${NC}"
+echo -e "${GREEN}✅ Updated components/environments/sensor-forecasting-env.yaml${NC}"
 
 # Step 6: Summary
 echo ""
@@ -110,7 +110,7 @@ echo "Image Tag: $IMAGE_TAG"
 echo ""
 echo "Next steps:"
 echo "1. Register environment in Azure ML:"
-echo "   az ml environment create --file config/environment.yaml"
+echo "   az ml environment create --file components/environments/sensor-forecasting-env.yaml"
 echo ""
 echo "2. Or run build pipeline (auto-registers)"
 echo "================================================"

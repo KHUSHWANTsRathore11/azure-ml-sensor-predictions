@@ -34,7 +34,7 @@ def validate_components(components_dir: str) -> int:
     validated_count = 0
     
     # Validate component subdirectories
-    for comp_file in components_path.glob("*/component.yaml"):
+    for comp_file in components_path.glob("*/*/component.yaml"):
         print(f"Checking: {comp_file}")
         
         try:
@@ -56,7 +56,7 @@ def validate_components(components_dir: str) -> int:
             failed = True
     
     # Validate pipeline component
-    pipeline_comp = components_path / "training-pipeline-component.yaml"
+    pipeline_comp = components_path / "pipelines" / "training-pipeline-component.yaml"
     if pipeline_comp.exists():
         print(f"Checking: {pipeline_comp}")
         

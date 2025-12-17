@@ -53,7 +53,7 @@ az pipelines runs show --id <run-id>
 **Issue:** Environment registration fails
 
 **Check:**
-- `config/environment.yaml` exists
+- `components/environments/sensor-forecasting-env.yaml` exists
 - `name` and `version` fields present
 - Azure ML workspace accessible
 

@@ -72,7 +72,7 @@ validationMaxRmse: 15.0
 
 ```bash
 # Update environment version
-# config/environment.yaml: version "1.0.0" → "1.1.0"
+# components/environments/sensor-forecasting-env.yaml: version "1.0.0" → "1.1.0"
 
 # Run pipeline
 az pipelines run --name "training-pipeline"

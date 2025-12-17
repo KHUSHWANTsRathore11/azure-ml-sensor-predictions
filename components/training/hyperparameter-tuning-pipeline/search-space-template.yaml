@@ -1,0 +1,47 @@
+# Hyperparameter Search Space Template
+# Copy and customize this file for your hyperparameter tuning experiments
+
+# LSTM Architecture
+lstm_units:
+  type: choice
+  values: [32, 64, 128, 256]
+  # Recommendation: Start with [64, 128] for faster experiments
+
+# Learning Rate
+learning_rate:
+  type: loguniform
+  min_value: 0.0001
+  max_value: 0.01
+  # Alternative: Use choice for specific values
+  # type: choice
+  # values: [0.0001, 0.0005, 0.001, 0.005, 0.01]
+
+# Training Epochs
+epochs:
+  type: choice
+  values: [30, 50, 100]
+  # Recommendation: Use fewer epochs (30, 50) for faster tuning
+
+# Batch Size
+batch_size:
+  type: choice
+  values: [16, 32, 64]
+  # Recommendation: Larger batch sizes train faster but may reduce accuracy
+
+# Dropout (if you want to tune this)
+# dropout:
+#   type: uniform
+#   min_value: 0.1
+#   max_value: 0.5
+
+# Sequence Length (if you want to tune this)
+# sequence_length:
+#   type: choice
+#   values: [12, 24, 48, 72]
+
+# Notes:
+# - Start with a small search space (2-3 values per parameter) for quick experiments
+# - Use 'choice' for discrete values, 'uniform' for continuous ranges
+# - Use 'loguniform' for learning rates (better distribution across orders of magnitude)
+# - Limit max_trials to 10-20 for initial experiments
+# - Consider using 'bayesian' sampling for better convergence with fewer trials

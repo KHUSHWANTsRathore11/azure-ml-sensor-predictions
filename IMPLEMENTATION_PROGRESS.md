@@ -209,7 +209,7 @@ The following are ready for testing:
 
 1. **Environment Registration**
    ```bash
-   az ml environment create --file config/environment.yaml
+   az ml environment create --file components/environments/sensor-forecasting-env.yaml
    ```
 
 2. **Component Registration**

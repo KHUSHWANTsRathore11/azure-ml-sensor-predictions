@@ -137,8 +137,8 @@ echo ""
 # Test 6: Environment Registration
 # ============================================
 test_step "Environment Registration (Dry Run)"
-if [ -f "config/environment.yaml" ]; then
-    success "Environment config found: config/environment.yaml"
+if [ -f "components/environments/sensor-forecasting-env.yaml" ]; then
+    success "Environment config found: components/environments/sensor-forecasting-env.yaml"
     
     # Check if environment exists
     ENV_EXISTS=$(az ml environment show \
@@ -249,7 +249,7 @@ echo -e "${GREEN}✅ All tests passed!${NC}"
 echo "================================================"
 echo ""
 echo "📋 Next Steps:"
-echo "   1. Register environment: az ml environment create --file config/environment.yaml"
+echo "   1. Register environment: az ml environment create --file components/environments/sensor-forecasting-env.yaml"
 echo "   2. Register components: az ml component create --file components/training/train-lstm-model/component.yaml"
 echo "   3. Run build pipeline in Azure DevOps"
 echo ""

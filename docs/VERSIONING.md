@@ -17,7 +17,7 @@ All versioning strategies for environments, components, models, and data.
 
 ## Environment Version
 
-**Location:** `config/environment.yaml`
+**Location:** `components/environments/sensor-forecasting-env.yaml`
 
 **Purpose:** Environment registration/promotion only (NOT in training hash)
 
@@ -33,7 +33,7 @@ All versioning strategies for environments, components, models, and data.
 
 **Example:**
 ```yaml
-# config/environment.yaml
+# components/environments/sensor-forecasting-env.yaml
 name: custom-training-env
 version: "1.1.0"  # ← Bump this
 dependencies:
@@ -176,7 +176,7 @@ transformations:
 ### Update Environment Only
 
 ```bash
-# 1. Update config/environment.yaml
+# 1. Update components/environments/sensor-forecasting-env.yaml
 version: "1.0.0" → "1.1.0"
 
 # 2. Run pipeline

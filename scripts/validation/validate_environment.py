@@ -3,7 +3,7 @@
 Validate environment.yaml configuration file.
 
 Usage:
-    python scripts/validation/validate_environment.py --config config/environment.yaml
+    python scripts/validation/validate_environment.py --config components/environments/sensor-forecasting-env.yaml
 """
 
 import argparse
@@ -56,8 +56,8 @@ def main():
     )
     parser.add_argument(
         '--config',
-        default='config/environment.yaml',
-        help='Path to environment.yaml (default: config/environment.yaml)'
+        default='components/environments/sensor-forecasting-env.yaml',
+        help='Path to environment.yaml (default: components/environments/sensor-forecasting-env.yaml)'
     )
     
     args = parser.parse_args()

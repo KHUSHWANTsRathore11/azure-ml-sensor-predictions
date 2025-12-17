@@ -112,7 +112,7 @@ stages:
           - script: python scripts/validation/validate_circuits.py --config config/circuits.yaml
             displayName: 'Validate circuits.yaml'
         
-          - script: python scripts/validation/validate_environment.py --config config/environment.yaml
+          - script: python scripts/validation/validate_environment.py --config components/environments/sensor-forecasting-env.yaml
             displayName: 'Validate environment.yaml'
         
           - script: python scripts/validation/validate_components.py --components-dir components
@@ -242,8 +242,8 @@ stages:
                 
                 # Check Environment version
                 echo "📦 Checking Environment version..."
-                ENV_VERSION=$(grep "^version:" config/environment.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
-                ENV_NAME_VAL=$(grep "^name:" config/environment.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                ENV_VERSION=$(grep "^version:" components/environments/sensor-forecasting-env.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
+                ENV_NAME_VAL=$(grep "^name:" components/environments/sensor-forecasting-env.yaml | awk '{print $2}' | tr -d '"' | tr -d "'")
                 
                 if az ml environment show \
                   --name "$ENV_NAME_VAL" \
